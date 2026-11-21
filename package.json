@@ -1,0 +1,20 @@
+{
+  "name": "pywlet",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Offline-first Python & Pygame IDE with a Socratic local AI tutor for learners",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^3.3.3",
+    "monaco-editor": "^0.52.2"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2",
+    "vite": "^6.0.5"
+  }
+}

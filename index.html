@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Pywlet — Learn Python & Pygame</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <!-- Top Toolbar -->
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-icon">🐍</span>
+          <span class="brand-title">Pywlet</span>
+          <span class="brand-badge">Learn Mode</span>
+        </div>
+
+        <div class="project-controls">
+          <label for="template-select" class="sr-only">Starter Project</label>
+          <select id="template-select" class="select-control" title="Choose a starter project">
+            <option value="bouncing-ball">🏀 Project: Bouncing Ball (Pygame)</option>
+            <option value="tilemap-adventure">🗺️ Project: Tilemap World &amp; Sprites</option>
+            <option value="star-catcher">🚀 Project: Star Catcher (Pygame)</option>
+            <option value="python-playground">🧪 Project: Python Playground</option>
+          </select>
+          <button id="btn-open-folder" class="btn btn-secondary" title="Open a local project folder from your computer">
+            📂 Open Folder
+          </button>
+          <button id="btn-save-project" class="btn btn-secondary" title="Save project (Ctrl+S)">
+            💾 Save
+          </button>
+        </div>
+
+        <div class="run-controls">
+          <div class="layout-toggles" title="Slide side panels in/out or enter Focus Mode">
+            <button id="btn-toggle-left-panel" class="btn btn-small" title="Show/Hide Left Files & Cheatsheets Sidebar">
+              ◀ Files
+            </button>
+            <button id="btn-focus-mode" class="btn btn-small" title="Focus Mode: Slide both side panels out of the way (Ctrl+B)">
+              🧘 Focus Mode
+            </button>
+            <button id="btn-toggle-right-panel" class="btn btn-small" title="Show/Hide Right Game Stage & Tutor Panel">
+              Stage ▶
+            </button>
+          </div>
+          <button id="btn-run" class="btn btn-run" title="Run your Python code (F5)">
+            ▶ Run Game
+          </button>
+          <button id="btn-stop" class="btn btn-stop" disabled title="Stop running game">
+            ⏹ Stop
+          </button>
+          <span id="runtime-status" class="status-pill status-ready">Python Ready</span>
+        </div>
+      </header>
+
+      <!-- Main 3-Column IDE Workspace -->
+      <main class="workspace">
+        <!-- Left Sidebar: Project Files & Visual Cheatsheets -->
+        <aside class="sidebar">
+          <section class="panel-section">
+            <div class="section-header">
+              <span>📁 PROJECT FILES</span>
+              <button id="btn-new-file" class="icon-btn" title="New Python file">+ New</button>
+            </div>
+            <ul id="file-list" class="file-list"></ul>
+          </section>
+
+          <section class="panel-section">
+            <div class="section-header">
+              <span>🎨 BUILT-IN SPRITES & SOUNDS</span>
+            </div>
+            <div id="asset-list" class="asset-list">
+              <div class="asset-item" data-snippet='"assets/ship.png"'>🚀 <code>ship.png</code> <span class="meta">32×32</span></div>
+              <div class="asset-item" data-snippet='"assets/star.png"'>⭐ <code>star.png</code> <span class="meta">24×24</span></div>
+              <div class="asset-item" data-snippet='"assets/alien.png"'>👾 <code>alien.png</code> <span class="meta">32×32</span></div>
+              <div class="asset-item" data-snippet='"assets/boop.wav"'>🔊 <code>boop.wav</code> <span class="meta">sfx</span></div>
+            </div>
+          </section>
+
+          <section class="panel-section cheatsheet-section">
+            <div class="section-header">
+              <span>📚 QUICK CHEATSHEETS</span>
+            </div>
+            <div class="cheatsheet-tabs">
+              <button class="chip active" data-cheat="coords">📐 Coordinates</button>
+              <button class="chip" data-cheat="colors">🎨 RGB Colors</button>
+              <button class="chip" data-cheat="keys">⌨️ Keys</button>
+              <button class="chip" data-cheat="fonts">🔤 Fonts</button>
+              <button class="chip" data-cheat="loops">🔁 Loops</button>
+            </div>
+            <div id="cheatsheet-content" class="cheatsheet-card"></div>
+          </section>
+        </aside>
+
+        <!-- Center Pane: Mode Switcher (Code Editor vs Sprite & Map Studio) + Console -->
+        <section class="editor-column">
+          <div class="editor-statusbar">
+            <div class="center-mode-tabs">
+              <button id="tab-code-editor" class="mode-tab active">
+                🐍 Code Editor (<span id="active-filename">main.py</span>)
+              </button>
+              <button id="tab-sprite-studio" class="mode-tab">
+                🎨 Sprite &amp; Map Studio (<code>sprites_data.py</code>)
+              </button>
+              <span id="syntax-badge" class="badge badge-ok">✓ No Syntax Issues</span>
+            </div>
+            <div class="editor-actions" id="code-editor-actions">
+              <button id="btn-explain-selection" class="btn btn-Ask" title="Ask Pywlet Tutor to explain the selected code or word under cursor">
+                💡 Explain Under Cursor / Selection
+              </button>
+            </div>
+          </div>
+
+          <div id="monaco-container" class="monaco-container"></div>
+          <div id="sprite-studio-container" class="sprite-studio-container hidden"></div>
+
+          <!-- Instant Live Error & Mistake Banner (Pre-LLM zero latency) -->
+          <div id="live-diagnostic-banner" class="diagnostic-banner hidden">
+            <div class="diagnostic-text">
+              <strong id="diagnostic-title">🐞 Python Notice:</strong>
+              <span id="diagnostic-message"></span>
+            </div>
+            <button id="btn-ask-diagnostic" class="btn btn-small">Ask Tutor Why →</button>
+          </div>
+
+          <!-- Console Output Drawer -->
+          <div class="console-panel">
+            <div class="section-header">
+              <span>💻 PYTHON CONSOLE (`print` & tracebacks)</span>
+              <button id="btn-clear-console" class="icon-btn">Clear</button>
+            </div>
+            <pre id="console-output" class="console-output">Welcome to Pywlet! Click "▶ Run Game" to start your program.</pre>
+          </div>
+        </section>
+
+        <!-- Right Column: Pygame Canvas Stage + Socratic AI Tutor -->
+        <section class="stage-tutor-column">
+          <!-- Game Stage -->
+          <div class="stage-panel" id="stage-panel">
+            <div class="section-header">
+              <span>🎮 GAME STAGE (400 × 280)</span>
+              <div class="stage-header-actions">
+                <span id="canvas-coords" class="coord-readout">Mouse: (0, 0)</span>
+                <button id="btn-expand-game" class="icon-btn" title="Expand Game Stage to Full Window Theater Mode (Esc to exit)">
+                  🗖 Full Window
+                </button>
+                <button id="btn-fullscreen-game" class="icon-btn" title="Play Game in Fullscreen Mode (Esc to exit)">
+                  ⛶ Fullscreen
+                </button>
+              </div>
+            </div>
+            <div class="canvas-wrapper" id="canvas-wrapper">
+              <div id="theater-toolbar" class="theater-toolbar hidden">
+                <span class="theater-title">🎮 Pywlet Game Theater — Use Arrow Keys / Space to Play</span>
+                <div class="theater-actions">
+                  <button id="btn-theater-restart" class="btn btn-small btn-run">↻ Restart Game</button>
+                  <button id="btn-theater-exit" class="btn btn-small btn-stop">✕ Exit Full Window (Esc)</button>
+                </div>
+              </div>
+              <canvas id="pygame-canvas" width="400" height="280" tabindex="0"></canvas>
+              <div id="canvas-overlay" class="canvas-overlay">
+                <p>Click <strong>▶ Run Game</strong> to launch your Pygame window here!</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Socratic AI Tutor Panel -->
+          <div class="tutor-panel">
+            <div class="section-header tutor-header">
+              <div>
+                <span>🦉 PYWLET TUTOR</span>
+                <span class="tutor-subtitle">Explains & hints — never spoils the code!</span>
+              </div>
+              <div class="llm-backend-picker">
+                <select id="llm-backend-select" class="select-control select-small" title="Choose Local AI Backend">
+                  <option value="transformers-js">Transformers.js (Qwen Local)</option>
+                  <option value="chrome-prompt">Chrome Prompt API (Gemma 4 / Nano)</option>
+                  <option value="ollama-local">Local Server (Ollama / llama.cpp)</option>
+                </select>
+                <button id="btn-ai-setup-help" class="btn btn-small" title="How to enable Chrome Flags for WebGPU & Built-in AI (Gemma 4)">
+                  ❓ Flags Help
+                </button>
+                <button id="btn-load-model" class="btn btn-small" title="Initialize or warm up local AI model">
+                  ⚡ Load AI
+                </button>
+              </div>
+            </div>
+
+            <!-- Collapsible Chrome Flags Setup Help Drawer (toggled via ❓ Flags Help next to AI selector) -->
+            <div id="chrome-flags-help-drawer" class="webgpu-flags-guide hidden">
+              <div class="flags-drawer-header">
+                <strong>⚙️ Required Chrome Flags (WebGPU + Built-in Gemma 4 AI)</strong>
+                <button id="btn-close-flags-help" class="icon-btn" title="Close help">✕</button>
+              </div>
+              <p class="flags-drawer-intro">
+                Copy &amp; paste each URL into Chrome's address bar, set to <strong>Enabled</strong>, then click <strong>Relaunch</strong>:
+              </p>
+              <div class="flags-group">
+                <div class="flags-group-title">1. Hardware WebGPU Acceleration (Linux / AMD / Intel / NVIDIA)</div>
+                <ul>
+                  <li>
+                    <code>chrome://flags/#ignore-gpu-blocklist</code> → <strong>Enabled</strong>
+                    <span class="flag-desc">(Override software rendering list — prevents fallback to <code>google / swiftshader</code>)</span>
+                  </li>
+                  <li>
+                    <code>chrome://flags/#enable-vulkan</code> → <strong>Enabled</strong>
+                    <span class="flag-desc">(Vulkan — use Vulkan as the graphics backend)</span>
+                  </li>
+                  <li>
+                    <code>chrome://flags/#force-enable-webgpu-interop</code> → <strong>Enabled</strong>
+                    <span class="flag-desc">(Force enable WebGPU interop on Vulkan via GL compositing)</span>
+                  </li>
+                  <li>
+                    <code>chrome://flags/#enable-unsafe-webgpu</code> → <strong>Enabled</strong>
+                    <span class="flag-desc">(Unsafe WebGPU Support — enables WebGPU on Linux configurations)</span>
+                  </li>
+                </ul>
+              </div>
+              <div class="flags-group">
+                <div class="flags-group-title">2. Chrome Built-in AI (Prompt API &amp; Gemma 4)</div>
+                <ul>
+                  <li>
+                    <code>chrome://flags/#prompt-api</code> → <strong>Enabled</strong>
+                    <span class="flag-desc">(Enables the built-in <code>LanguageModel</code> Prompt API)</span>
+                  </li>
+                  <li>
+                    <code>chrome://flags/#gemma4-for-built-in-ai</code> → <strong>Enabled</strong>
+                    <span class="flag-desc">(Enables all built-in AI APIs to use the on-device Gemma 4 model)</span>
+                  </li>
+                </ul>
+                <div class="flags-tip">
+                  💡 <em>Tip:</em> After relaunching, you can check model download progress in <code>chrome://on-device-internals</code> or <code>chrome://components</code>.
+                </div>
+              </div>
+            </div>
+
+            <div id="llm-status-bar" class="llm-status-bar">
+              <span id="llm-status-text">Local AI idle — Instant coach active. Click "⚡ Load AI" or ask a question!</span>
+              <button id="btn-toggle-debug" class="icon-btn" title="Show/Hide AI & GPU Debug Inspector">
+                🔍 AI Debug
+              </button>
+            </div>
+
+            <!-- Collapsible AI & WebGPU Debug Inspector Panel -->
+            <div id="ai-debug-panel" class="ai-debug-panel">
+              <div class="ai-debug-header">
+                <div class="ai-debug-badges">
+                  <span id="gpu-device-badge" class="badge badge-warn">GPU: Probing...</span>
+                  <span id="llm-perf-badge" class="badge badge-ok">0 tok/s</span>
+                </div>
+                <div class="ai-debug-controls">
+                  <button id="btn-webgpu-help" class="icon-btn" title="Show Chrome flags for WebGPU & Built-in AI">
+                    ⚙️ Chrome Flags
+                  </button>
+                  <button id="btn-clear-debug" class="icon-btn">Clear</button>
+                </div>
+              </div>
+
+              <div class="ai-debug-grid">
+                <div class="ai-debug-box">
+                  <div class="ai-debug-label">📤 Last Outgoing Prompt &amp; Event Log</div>
+                  <pre id="ai-debug-log" class="ai-debug-pre">Waiting for AI activity...</pre>
+                </div>
+                <div class="ai-debug-box">
+                  <div class="ai-debug-label">📥 Live Raw Token Stream</div>
+                  <pre id="ai-debug-stream" class="ai-debug-pre">(No tokens generated yet)</pre>
+                </div>
+              </div>
+            </div>
+
+            <div id="tutor-messages" class="tutor-messages">
+              <div class="tutor-msg tutor-msg-assistant">
+                <strong>Hi! I'm Pywlet 🦉</strong><br />
+                Highlight any Python word in the editor and click <em>"💡 Explain Under Cursor"</em>, or ask me a question below. I won't write the code for you, but I'll help you figure it out!
+              </div>
+            </div>
+
+            <form id="tutor-form" class="tutor-input-row">
+              <input
+                id="tutor-input"
+                type="text"
+                placeholder="Ask about your code, Python syntax, or how to build an idea..."
+                autocomplete="off"
+              />
+              <button type="submit" id="btn-send-tutor" class="btn btn-Ask">Ask</button>
+            </form>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
