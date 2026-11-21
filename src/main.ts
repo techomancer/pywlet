@@ -5,6 +5,7 @@ import { TutorService } from './llm/tutor-service';
 import type { LLMBackendId, LLMDebugEvent, TutorCodeContext } from './llm/types';
 import { CHEATSHEETS, WorkspaceStore } from './workspace/templates';
 import { SpriteEditorController } from './sprite-editor/sprite-editor';
+import { initPwa } from './pwa/register-pwa';
 
 function formatSimpleMarkdown(text: string): string {
   return text
@@ -631,6 +632,7 @@ function bootstrapPywlet(): void {
   cheatsheetContentEl.innerHTML = CHEATSHEETS.coords;
   renderFileList();
   runLiveDiagnostics(editor.getValue());
+  initPwa(document.getElementById('btn-install-pwa'));
 }
 
 bootstrapPywlet();

@@ -1,0 +1,39 @@
+{
+  "id": "./",
+  "name": "Pywlet — Learn Python & Pygame",
+  "short_name": "Pywlet",
+  "description": "Offline-first Python & Pygame coding IDE with a Socratic local AI tutor for learners.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "landscape-primary",
+  "background_color": "#0f141c",
+  "theme_color": "#161d29",
+  "categories": ["education", "developer tools", "games"],
+  "icons": [
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

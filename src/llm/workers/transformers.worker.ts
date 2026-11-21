@@ -16,7 +16,11 @@ if (env.backends?.onnx?.wasm) {
     wasm: ortWasmUrl,
   } as any;
   const cores = typeof navigator !== 'undefined' ? navigator.hardwareConcurrency || 4 : 4;
-  env.backends.onnx.wasm.numThreads = Math.min(4, Math.max(1, cores));
+  // Multi-threaded WASM requires SharedArrayBuffer (COOP/COEP headers).
+  // Static hosts like GitHub Pages cannot set custom COOP/COEP headers, so
+  // fall back cleanly to single-threaded SIMD WASM when not cross-origin isolated.
+  const canUseThreads = typeof self !== 'undefined' && Boolean((self as any).crossOriginIsolated);
+  env.backends.onnx.wasm.numThreads = canUseThreads ? Math.min(4, Math.max(1, cores)) : 1;
 }
 
 // IMPORTANT: On Linux with integrated GPUs (like AMD Radeon Lucienne), Transformers.js sets
