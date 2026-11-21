@@ -31,6 +31,9 @@ jobs:
         uses: actions/configure-pages@v5
 
       - name: Install dependencies
+        env:
+          # Pywlet runs in the browser via onnxruntime-web; skip unused Linux CUDA binaries
+          ONNXRUNTIME_NODE_INSTALL_CUDA: skip
         run: npm install
 
       - name: Build production bundle
