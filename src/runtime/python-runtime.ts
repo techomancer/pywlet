@@ -2,38 +2,71 @@ import {
   flattenSpriteLayers,
   type SpriteProjectData,
 } from '../sprite-editor/sprite-data';
-import { stripStringsAndComments } from '../diagnostics/python-coach';
+import type { PythonDiagnostic } from '../diagnostics/python-coach';
 
 export interface RuntimeCallbacks {
   onStdout: (line: string) => void;
   onStderr: (line: string, friendlyLine?: { line: number; message: string }) => void;
   onStatusChange: (status: 'ready' | 'running' | 'loading') => void;
+  onPyodideReady?: () => void;
   getSpriteProjectData?: () => SpriteProjectData;
   getWorkspaceFile?: (filename: string) => string | null;
 }
 
+const KEY_CODE_TO_PYGAME: Record<string, number> = {
+  ArrowLeft: 1,
+  ArrowRight: 2,
+  ArrowUp: 3,
+  ArrowDown: 4,
+  Space: 5,
+  Enter: 6,
+  Escape: 7,
+  ShiftLeft: 8,
+  ShiftRight: 9,
+  Backspace: 10,
+  Tab: 11,
+};
+
+for (let i = 0; i < 26; i++) {
+  const ch = String.fromCharCode(65 + i);
+  KEY_CODE_TO_PYGAME[`Key${ch}`] = 20 + i;
+}
+for (let i = 0; i < 10; i++) {
+  KEY_CODE_TO_PYGAME[`Digit${i}`] = 50 + i;
+}
+
 /**
- * Python + Pygame-compatible runtime engine for the browser.
+ * Real CPython 3.14 (Pyodide WebAssembly) + HTML5 Canvas Pygame runtime & real-time AST linter.
  *
- * Architecture:
- * 1. If a local or cached Pyodide bundle is present at `/vendor/pyodide/pyodide.mjs`,
- *    it loads full CPython WASM + `pygame-ce` SDL2 canvas.
- * 2. Simultaneously provides a built-in, zero-download HTML5 Canvas Pygame runner
- *    so that beginner Pygame programs (`pygame.init()`, `pygame.display.set_mode()`,
- *    `pygame.time.Clock()`, `screen.fill()`, `pygame.draw.circle()`, `pygame.draw.rect()`,
- *    `pygame.draw.line()`, `pygame.key.get_pressed()`, `clock.tick(60)`) run immediately
- *    offline at 60 FPS without waiting for external WASM downloads.
+ * Runs Pyodide inside a dedicated Web Worker with self-hosted WASM/stdlib from `<base>pyodide/`,
+ * SharedArrayBuffer key/mouse/interrupt synchronization (for true 60 FPS synchronous `while running:`
+ * Pygame loops and instant Stop), and real CPython `ast.parse` live diagnostics.
  */
 export class PythonPygameRuntime {
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
   private callbacks: RuntimeCallbacks;
+
+  private worker: Worker | null = null;
+  private pyodideReady = false;
   private running = false;
-  private animFrameId: number | null = null;
-  private pressedKeys: Set<string> = new Set();
-  private pyodide: any = null;
+  private stopWatchdog: number | null = null;
+
+  private interruptSab: SharedArrayBuffer | null = null;
+  private interruptBuf: Int32Array | null = null;
+  private inputSab: SharedArrayBuffer | null = null;
+  private inputBuf: Int32Array | null = null;
+  private waitSab: SharedArrayBuffer | null = null;
+  private waitBuf: Int32Array | null = null;
+
   private imageCache: Map<string, { src: string; img: HTMLImageElement }> = new Map();
   private lastSoundPlayAt: Map<string, number> = new Map();
+
+  private lintSeq = 0;
+  private pendingLints: Map<
+    number,
+    { resolve: (diags: PythonDiagnostic[]) => void; reject: (err: any) => void }
+  > = new Map();
 
   constructor(canvas: HTMLCanvasElement, callbacks: RuntimeCallbacks) {
     this.canvas = canvas;
@@ -42,600 +75,486 @@ export class PythonPygameRuntime {
     this.ctx = ctx;
     this.callbacks = callbacks;
 
+    this.initSharedBuffers();
     this.bindInputEvents();
+  }
+
+  private getPyodideBaseUrl(): string {
+    const base = import.meta.env.BASE_URL || '/';
+    return new URL(`${base}pyodide/`, window.location.origin).href;
+  }
+
+  private initSharedBuffers(): void {
+    if (typeof SharedArrayBuffer !== 'undefined' && window.crossOriginIsolated) {
+      this.interruptSab = new SharedArrayBuffer(4);
+      this.interruptBuf = new Int32Array(this.interruptSab);
+      this.inputSab = new SharedArrayBuffer(128 * 4);
+      this.inputBuf = new Int32Array(this.inputSab);
+      this.waitSab = new SharedArrayBuffer(4);
+      this.waitBuf = new Int32Array(this.waitSab);
+    }
+  }
+
+  private ensureWorker(): Worker {
+    if (this.worker) return this.worker;
+
+    const worker = new Worker(new URL('./pyodide.worker.ts', import.meta.url), {
+      type: 'module',
+    });
+
+    worker.onmessage = (event: MessageEvent) => {
+      const msg = event.data;
+      if (!msg) return;
+
+      if (msg.type === 'STATUS' && msg.status === 'loading') {
+        if (!this.running) {
+          this.callbacks.onStatusChange('loading');
+        }
+        return;
+      }
+
+      if (msg.type === 'READY') {
+        this.pyodideReady = true;
+        if (!this.running) {
+          this.callbacks.onStatusChange('ready');
+        }
+        this.callbacks.onPyodideReady?.();
+        return;
+      }
+
+      if (msg.type === 'INIT_ERROR') {
+        this.callbacks.onStderr(`Failed to initialize Python (Pyodide): ${msg.error}`);
+        this.callbacks.onStatusChange('ready');
+        return;
+      }
+
+      if (msg.type === 'STDOUT') {
+        this.callbacks.onStdout(msg.line);
+        return;
+      }
+
+      if (msg.type === 'STDERR') {
+        this.callbacks.onStderr(msg.line);
+        return;
+      }
+
+      if (msg.type === 'FRAME') {
+        if (this.running) {
+          try {
+            const cmds = JSON.parse(msg.commandsJson);
+            this.renderFrameCommands(cmds);
+          } catch {
+            // Ignore malformed batch
+          }
+        }
+        return;
+      }
+
+      if (msg.type === 'SOUND') {
+        if (this.running) {
+          this.playWorkspaceSound(msg.path, msg.volume ?? 0.7);
+        }
+        return;
+      }
+
+      if (msg.type === 'RUN_ERROR') {
+        this.callbacks.onStderr(msg.raw, {
+          line: msg.line || 1,
+          message: msg.message || msg.raw,
+        });
+        return;
+      }
+
+      if (msg.type === 'RUN_DONE') {
+        this.clearStopWatchdog();
+        this.running = false;
+        this.callbacks.onStatusChange('ready');
+        return;
+      }
+
+      if (msg.type === 'LINT_RESULT') {
+        const pending = this.pendingLints.get(msg.requestId);
+        if (pending) {
+          this.pendingLints.delete(msg.requestId);
+          pending.resolve(Array.isArray(msg.diagnostics) ? msg.diagnostics : []);
+        }
+      }
+    };
+
+    worker.onerror = (err) => {
+      this.callbacks.onStderr(`Python worker error: ${err.message || String(err)}`);
+      this.running = false;
+      this.callbacks.onStatusChange('ready');
+    };
+
+    this.worker = worker;
+    worker.postMessage({
+      type: 'INIT',
+      pyodideBaseUrl: this.getPyodideBaseUrl(),
+      interruptSab: this.interruptSab,
+      inputSab: this.inputSab,
+      waitSab: this.waitSab,
+    });
+
+    return worker;
+  }
+
+  public preload(): void {
+    this.ensureWorker();
+  }
+
+  public isPyodideReady(): boolean {
+    return this.pyodideReady;
+  }
+
+  public isRunning(): boolean {
+    return this.running;
   }
 
   private bindInputEvents(): void {
     window.addEventListener('keydown', (e) => {
-      if (this.running) {
-        this.pressedKeys.add(e.code);
+      if (!this.running) return;
+      const pgCode = KEY_CODE_TO_PYGAME[e.code];
+      if (pgCode !== undefined) {
         if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) {
           e.preventDefault();
         }
+        if (this.inputBuf) {
+          Atomics.store(this.inputBuf, 4 + pgCode, 1);
+        } else {
+          this.worker?.postMessage({ type: 'FALLBACK_KEY', keyCode: pgCode, down: true });
+        }
+        this.worker?.postMessage({ type: 'EVENT', event: { type: 768, key: pgCode } });
       }
     });
 
     window.addEventListener('keyup', (e) => {
-      this.pressedKeys.delete(e.code);
+      const pgCode = KEY_CODE_TO_PYGAME[e.code];
+      if (pgCode !== undefined) {
+        if (this.inputBuf) {
+          Atomics.store(this.inputBuf, 4 + pgCode, 0);
+        } else {
+          this.worker?.postMessage({ type: 'FALLBACK_KEY', keyCode: pgCode, down: false });
+        }
+        if (this.running) {
+          this.worker?.postMessage({ type: 'EVENT', event: { type: 769, key: pgCode } });
+        }
+      }
     });
+
+    const updateMouse = (e: MouseEvent) => {
+      const rect = this.canvas.getBoundingClientRect();
+      const scaleX = this.canvas.width / Math.max(1, rect.width);
+      const scaleY = this.canvas.height / Math.max(1, rect.height);
+      const x = Math.round((e.clientX - rect.left) * scaleX);
+      const y = Math.round((e.clientY - rect.top) * scaleY);
+      if (this.inputBuf) {
+        Atomics.store(this.inputBuf, 0, x);
+        Atomics.store(this.inputBuf, 1, y);
+        Atomics.store(this.inputBuf, 2, e.buttons);
+      } else if (this.running) {
+        this.worker?.postMessage({ type: 'FALLBACK_MOUSE', x, y, buttons: e.buttons });
+      }
+    };
+
+    this.canvas.addEventListener('mousemove', updateMouse);
+    this.canvas.addEventListener('mousedown', (e) => {
+      updateMouse(e);
+      if (this.running) {
+        const rect = this.canvas.getBoundingClientRect();
+        const x = Math.round(((e.clientX - rect.left) / Math.max(1, rect.width)) * this.canvas.width);
+        const y = Math.round(((e.clientY - rect.top) / Math.max(1, rect.height)) * this.canvas.height);
+        this.worker?.postMessage({
+          type: 'EVENT',
+          event: { type: 1025, pos: [x, y], button: e.button + 1 },
+        });
+      }
+    });
+    this.canvas.addEventListener('mouseup', updateMouse);
   }
 
-  isRunning(): boolean {
-    return this.running;
-  }
-
-  stop(): void {
-    this.running = false;
-    if (this.animFrameId !== null) {
-      cancelAnimationFrame(this.animFrameId);
-      this.animFrameId = null;
+  private clearStopWatchdog(): void {
+    if (this.stopWatchdog !== null) {
+      window.clearTimeout(this.stopWatchdog);
+      this.stopWatchdog = null;
     }
+  }
+
+  public stop(): void {
+    if (!this.running) return;
+    this.running = false;
     this.callbacks.onStatusChange('ready');
+
+    if (this.inputBuf) {
+      Atomics.store(this.inputBuf, 3, 1);
+    }
+    if (this.interruptBuf) {
+      Atomics.store(this.interruptBuf, 0, 2); // SIGINT -> KeyboardInterrupt
+    }
+    if (this.waitBuf) {
+      Atomics.store(this.waitBuf, 0, 1);
+      Atomics.notify(this.waitBuf, 0);
+    }
+    this.worker?.postMessage({ type: 'STOP' });
+
+    // If a runaway loop doesn't stop (or SharedArrayBuffer isn't available),
+    // terminate & respawn a fresh worker so Stop ALWAYS works!
+    this.clearStopWatchdog();
+    this.stopWatchdog = window.setTimeout(() => {
+      this.stopWatchdog = null;
+      if (!this.running && this.worker) {
+        this.respawnWorker();
+      }
+    }, 350);
+  }
+
+  private respawnWorker(): void {
+    if (this.worker) {
+      this.worker.terminate();
+      this.worker = null;
+    }
+    this.pyodideReady = false;
+    for (const [, p] of this.pendingLints) {
+      p.resolve([]);
+    }
+    this.pendingLints.clear();
+    if (this.interruptBuf) Atomics.store(this.interruptBuf, 0, 0);
+    if (this.inputBuf) Atomics.store(this.inputBuf, 3, 0);
+    if (this.waitBuf) Atomics.store(this.waitBuf, 0, 0);
+    this.ensureWorker();
   }
 
   /**
-   * Executes the learner's Python/Pygame script.
+   * Runs real CPython 3.14 `ast.parse` + scope/undefined-name + Pygame AST linting
+   * inside the Pyodide Web Worker.
    */
-  async runCode(code: string): Promise<void> {
-    this.stop();
+  public async lintCode(code: string, filename = 'main.py'): Promise<PythonDiagnostic[] | null> {
+    if (this.running) {
+      // Worker is busy executing a live 60 FPS game loop
+      return null;
+    }
+    const worker = this.ensureWorker();
+    const requestId = ++this.lintSeq;
+
+    return new Promise((resolve) => {
+      this.pendingLints.set(requestId, { resolve, reject: () => resolve([]) });
+      worker.postMessage({
+        type: 'LINT',
+        requestId,
+        code,
+        filename,
+        pyodideBaseUrl: this.getPyodideBaseUrl(),
+      });
+    });
+  }
+
+  /**
+   * Pre-decodes workspace `.png` files so we can pass their real width/height
+   * to `pygame.image.load(...)` inside the Python worker.
+   */
+  private async collectWorkspaceImageSizes(
+    workspaceFiles: Record<string, string>
+  ): Promise<Record<string, [number, number]>> {
+    const sizes: Record<string, [number, number]> = {};
+    const tasks: Promise<void>[] = [];
+
+    for (const [name, content] of Object.entries(workspaceFiles)) {
+      if (!name.toLowerCase().endsWith('.png') || !content.startsWith('data:image')) continue;
+      const img = this.getOrLoadImage(name, content);
+      if (img.complete && img.naturalWidth > 0) {
+        sizes[name] = [img.naturalWidth, img.naturalHeight];
+      } else {
+        tasks.push(
+          new Promise((resolve) => {
+            img.onload = () => {
+              sizes[name] = [img.naturalWidth || 32, img.naturalHeight || 32];
+              resolve();
+            };
+            img.onerror = () => resolve();
+          })
+        );
+      }
+    }
+
+    if (tasks.length > 0) {
+      await Promise.all(tasks);
+    }
+    return sizes;
+  }
+
+  /**
+   * Executes real Python/Pygame code inside Pyodide.
+   */
+  public async runCode(
+    code: string,
+    filename = 'main.py',
+    workspaceFiles: Record<string, string> = {}
+  ): Promise<void> {
+    if (this.running) {
+      this.stop();
+      // Give interrupted loop a moment to unwind before restarting
+      await new Promise((r) => setTimeout(r, 60));
+    }
+
+    const worker = this.ensureWorker();
+    this.clearStopWatchdog();
+
+    // Reset shared key/stop flags
+    if (this.interruptBuf) Atomics.store(this.interruptBuf, 0, 0);
+    if (this.inputBuf) {
+      for (let i = 3; i < 128; i++) Atomics.store(this.inputBuf, i, 0);
+    }
+    if (this.waitBuf) Atomics.store(this.waitBuf, 0, 0);
+
+    const imgSizes = await this.collectWorkspaceImageSizes(workspaceFiles);
+
+    // Filter only `.py` files to mount into Pyodide VFS
+    const pyFiles: Record<string, string> = {};
+    for (const [name, content] of Object.entries(workspaceFiles)) {
+      if (name.toLowerCase().endsWith('.py')) {
+        pyFiles[name] = content;
+      }
+    }
+
     this.running = true;
-    this.callbacks.onStatusChange('running');
+    this.callbacks.onStatusChange(this.pyodideReady ? 'running' : 'loading');
     this.canvas.focus();
 
-    if (!this.pyodide && (window as any).loadPyodide) {
-      try {
-        this.callbacks.onStdout('Loading Pyodide WASM runtime...');
-        this.pyodide = await (window as any).loadPyodide({
-          stdout: (msg: string) => this.callbacks.onStdout(msg),
-          stderr: (msg: string) => this.callbacks.onStderr(msg),
-        });
-      } catch {
-        // Fallback to built-in instant Pygame Canvas interpreter
-      }
-    }
-
-    if (this.pyodide) {
-      await this.runWithPyodide(code);
-    } else {
-      await this.runWithBuiltInPygameBridge(code);
-    }
-  }
-
-  private async runWithPyodide(code: string): Promise<void> {
-    try {
-      this.pyodide.canvas.setCanvas2D(this.canvas);
-      await this.pyodide.runPythonAsync(code);
-    } catch (err: any) {
-      this.reportPythonError(err?.message || String(err));
-      this.stop();
-    }
-  }
-
-  /**
-   * Built-in zero-dependency Python/Pygame interpreter for beginner Pygame scripts
-   * so the IDE works 100% offline out-of-the-box.
-   */
-  private async runWithBuiltInPygameBridge(code: string): Promise<void> {
-    try {
-      const lines = code.split('\n');
-      const env: Record<string, any> = {
-        WIDTH: this.canvas.width,
-        HEIGHT: this.canvas.height,
-        running: true,
-        score: 0,
-        pygame: '__PYGAME_MODULE__',
-        screen: '__PYGAME_SURFACE__',
-        clock: '__PYGAME_CLOCK__',
-        keys: '__PYGAME_KEYS__',
-      };
-
-      // Execute setup lines before the main `while` loop
-      let whileLineIdx = -1;
-      for (let i = 0; i < lines.length; i++) {
-        const raw = lines[i];
-        const trimmed = stripStringsAndComments(raw).withoutComment.trim();
-        if (!trimmed) continue;
-
-        if (/^while\s+/.test(trimmed)) {
-          whileLineIdx = i;
-          break;
-        }
-
-        this.execStatementLine(trimmed, i + 1, env);
-      }
-
-      if (whileLineIdx === -1) {
-        // Pure script without a game loop
-        this.stop();
-        return;
-      }
-
-      const loopLines = lines.slice(whileLineIdx + 1);
-      const stepFrame = () => {
-        if (!this.running || !env.running) {
-          this.stop();
-          return;
-        }
-
-        try {
-          this.execBlock(loopLines, whileLineIdx + 2, env);
-        } catch (err: any) {
-          this.reportPythonError(err?.message || String(err));
-          this.stop();
-          return;
-        }
-
-        this.animFrameId = requestAnimationFrame(stepFrame);
-      };
-
-      this.animFrameId = requestAnimationFrame(stepFrame);
-    } catch (err: any) {
-      this.reportPythonError(err?.message || String(err));
-      this.stop();
-    }
-  }
-
-  private execBlock(blockLines: string[], startLineNum: number, env: Record<string, any>): void {
-    let i = 0;
-    while (i < blockLines.length) {
-      const raw = blockLines[i];
-      const stripped = stripStringsAndComments(raw).withoutComment;
-      const trimmed = stripped.trim();
-      const lineNum = startLineNum + i;
-
-      if (!trimmed) {
-        i++;
-        continue;
-      }
-
-      // Handle `if <cond>:` or `elif <cond>:` or `else:` blocks
-      if ((trimmed.startsWith('if ') || trimmed.startsWith('elif ')) && trimmed.endsWith(':')) {
-        const keywordLen = trimmed.startsWith('elif ') ? 5 : 3;
-        const condExpr = trimmed.slice(keywordLen, -1).trim();
-        const indent = raw.search(/\S|$/);
-        const subLines: string[] = [];
-        let j = i + 1;
-        while (j < blockLines.length) {
-          const nextRaw = blockLines[j];
-          const nextTrim = stripStringsAndComments(nextRaw).withoutComment.trim();
-          if (nextTrim && nextRaw.search(/\S|$/) <= indent) break;
-          subLines.push(nextRaw);
-          j++;
-        }
-
-        if (this.evalCondition(condExpr, env, lineNum)) {
-          this.execBlock(subLines, lineNum + 1, env);
-        }
-        i = j;
-        continue;
-      }
-
-      // Handle `for event in pygame.event.get():` boilerplate block
-      if (trimmed.startsWith('for ') && trimmed.includes('pygame.event.get()')) {
-        const indent = raw.search(/\S|$/);
-        let j = i + 1;
-        while (j < blockLines.length) {
-          const nextRaw = blockLines[j];
-          const nextTrim = nextRaw.replace(/#.*$/, '').trim();
-          if (nextTrim && nextRaw.search(/\S|$/) <= indent) break;
-          j++;
-        }
-        i = j;
-        continue;
-      }
-
-      this.execStatementLine(trimmed, lineNum, env);
-      i++;
-    }
-  }
-
-  private execStatementLine(stmt: string, lineNum: number, env: Record<string, any>): void {
-    // 1. Ignore imports and Pygame window/clock/key setup calls (including LHS assignments like `screen = pygame.display.set_mode(...)`)
-    if (
-      stmt.startsWith('import ') ||
-      stmt.startsWith('from ') ||
-      stmt.startsWith('pygame.init') ||
-      stmt.startsWith('pygame.display.') ||
-      stmt.startsWith('pygame.quit') ||
-      stmt.includes('pygame.display.set_mode') ||
-      stmt.includes('pygame.display.set_caption') ||
-      stmt.includes('pygame.time.Clock') ||
-      stmt.includes('pygame.key.get_pressed') ||
-      stmt.includes('pygame.font.init') ||
-      stmt.includes('pygame.mixer.init') ||
-      /^\w+\.tick\s*\(/.test(stmt)
-    ) {
-      const lhsMatch = stmt.match(/^([a-zA-Z_]\w*)\s*=/);
-      if (lhsMatch) {
-        env[lhsMatch[1]] = '__PYGAME_OBJECT__';
-      }
-      return;
-    }
-
-    // 2. print(...)
-    const printMatch = stmt.match(/^print\s*\((.*)\)$/);
-    if (printMatch) {
-      const inner = printMatch[1].trim();
-      if (!inner) {
-        this.callbacks.onStdout('');
-        return;
-      }
-      const val = this.evalExpr(inner, env, lineNum);
-      this.callbacks.onStdout(String(val));
-      return;
-    }
-
-    // 3. screen.fill((r, g, b)) or screen.fill(color_var)
-    const fillMatch = stmt.match(/^\w+\.fill\s*\((.+)\)$/);
-    if (fillMatch) {
-      const rgb = this.parseColorTuple(fillMatch[1].trim(), env, lineNum);
-      this.ctx.fillStyle = `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
-      this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
-      return;
-    }
-
-    // 4. pygame.draw.circle(surface, color, (x, y), radius)
-    const circleMatch = stmt.match(
-      /^pygame\.draw\.circle\s*\(\s*\w+\s*,\s*(\([^)]+\)|\w+)\s*,\s*\(([^)]+)\)\s*,\s*([^)]+)\)$/
-    );
-    if (circleMatch) {
-      const rgb = this.parseColorTuple(circleMatch[1].trim(), env, lineNum);
-      const center = circleMatch[2].split(',').map((s) => Number(this.evalExpr(s.trim(), env, lineNum)));
-      const radius = Number(this.evalExpr(circleMatch[3].trim(), env, lineNum));
-
-      this.ctx.fillStyle = `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
-      this.ctx.beginPath();
-      this.ctx.arc(center[0] || 0, center[1] || 0, Math.max(1, radius), 0, Math.PI * 2);
-      this.ctx.fill();
-      return;
-    }
-
-    // 5. pygame.draw.rect(surface, color, (x, y, w, h))
-    const rectMatch = stmt.match(
-      /^pygame\.draw\.rect\s*\(\s*\w+\s*,\s*(\([^)]+\)|\w+)\s*,\s*\(([^)]+)\)\s*\)$/
-    );
-    if (rectMatch) {
-      const rgb = this.parseColorTuple(rectMatch[1].trim(), env, lineNum);
-      const rect = rectMatch[2].split(',').map((s) => Number(this.evalExpr(s.trim(), env, lineNum)));
-      this.ctx.fillStyle = `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
-      this.ctx.fillRect(rect[0] || 0, rect[1] || 0, rect[2] || 20, rect[3] || 20);
-      return;
-    }
-
-    // 6. pygame.draw.line(surface, color, (x1, y1), (x2, y2), width?)
-    const lineMatch = stmt.match(
-      /^pygame\.draw\.line\s*\(\s*\w+\s*,\s*(\([^)]+\)|\w+)\s*,\s*\(([^)]+)\)\s*,\s*\(([^)]+)\)(?:\s*,\s*([^)]+))?\)$/
-    );
-    if (lineMatch) {
-      const rgb = this.parseColorTuple(lineMatch[1].trim(), env, lineNum);
-      const p1 = lineMatch[2].split(',').map((s) => Number(this.evalExpr(s.trim(), env, lineNum)));
-      const p2 = lineMatch[3].split(',').map((s) => Number(this.evalExpr(s.trim(), env, lineNum)));
-      const width = lineMatch[4] ? Number(this.evalExpr(lineMatch[4].trim(), env, lineNum)) : 2;
-      this.ctx.strokeStyle = `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
-      this.ctx.lineWidth = Math.max(1, width);
-      this.ctx.beginPath();
-      this.ctx.moveTo(p1[0] || 0, p1[1] || 0);
-      this.ctx.lineTo(p2[0] || 0, p2[1] || 0);
-      this.ctx.stroke();
-      return;
-    }
-
-    // 6b. Built-in Sprite & Tilemap helpers:
-    // `draw_tilemap(screen, scale, map_name)` or `draw_sprite(screen, sprite_idx, x, y, scale, sheet_name)`
-    const tilemapDrawMatch = stmt.match(
-      /^draw_tilemap\s*\(\s*\w+(?:\s*,\s*([^,)]+))?(?:\s*,\s*([^)]+))?\s*\)$/
-    );
-    if (tilemapDrawMatch) {
-      const scale = tilemapDrawMatch[1]
-        ? Number(this.evalExpr(tilemapDrawMatch[1].trim(), env, lineNum))
-        : 4;
-      const mapName = tilemapDrawMatch[2]
-        ? String(this.evalExpr(tilemapDrawMatch[2].trim(), env, lineNum))
-        : undefined;
-      this.renderProjectTilemap(Math.max(1, scale), mapName);
-      return;
-    }
-
-    const spriteDrawMatch = stmt.match(
-      /^draw_sprite\s*\(\s*\w+\s*,\s*([^,]+)\s*,\s*([^,]+)\s*,\s*([^,)]+)(?:\s*,\s*([^,)]+))?(?:\s*,\s*([^)]+))?\s*\)$/
-    );
-    if (spriteDrawMatch) {
-      const spIdx = Number(this.evalExpr(spriteDrawMatch[1].trim(), env, lineNum));
-      const x = Number(this.evalExpr(spriteDrawMatch[2].trim(), env, lineNum));
-      const y = Number(this.evalExpr(spriteDrawMatch[3].trim(), env, lineNum));
-      const scale = spriteDrawMatch[4]
-        ? Number(this.evalExpr(spriteDrawMatch[4].trim(), env, lineNum))
-        : 4;
-      const sheetName = spriteDrawMatch[5]
-        ? String(this.evalExpr(spriteDrawMatch[5].trim(), env, lineNum))
-        : undefined;
-      this.renderProjectSprite(spIdx, x, y, Math.max(1, scale), sheetName);
-      return;
-    }
-
-    // 6c. Pygame Font & Text Rendering support:
-    // - `font = pygame.font.SysFont("monospace", 20)` or `pygame.font.Font(None, 24)`
-    // - `text_surf = font.render("Score: " + str(score), True, (255, 255, 0))`
-    // - `screen.blit(text_surf, (x, y))`
-    // - or shorthand `draw_text(screen, "Hello", x, y, size, color, font_name)`
-    const sysFontMatch = stmt.match(
-      /^([a-zA-Z_]\w*)\s*=\s*pygame\.font\.(?:SysFont|Font)\s*\(\s*([^,]+)\s*,\s*([^)]+)\s*\)$/
-    );
-    if (sysFontMatch) {
-      const [, fontVar, rawFamily, rawSize] = sysFontMatch;
-      const familyVal = rawFamily.trim() === 'None' ? 'monospace' : String(this.evalExpr(rawFamily.trim(), env, lineNum));
-      const sizeVal = Number(this.evalExpr(rawSize.trim(), env, lineNum)) || 18;
-      env[fontVar] = { __type: 'font', family: familyVal, size: sizeVal };
-      return;
-    }
-
-    const fontRenderMatch = stmt.match(
-      /^([a-zA-Z_]\w*)\s*=\s*([a-zA-Z_]\w*)\.render\s*\(\s*(.+?)\s*,\s*(?:True|False|1|0)\s*,\s*(\([^)]+\)|\w+)\s*\)$/
-    );
-    if (fontRenderMatch) {
-      const [, surfVar, fontVar, textExpr, colorExpr] = fontRenderMatch;
-      const fontObj = env[fontVar]?.__type === 'font' ? env[fontVar] : { family: 'monospace', size: 18 };
-      const textVal = String(this.evalExpr(textExpr.trim(), env, lineNum));
-      const rgb = this.parseColorTuple(colorExpr.trim(), env, lineNum);
-      env[surfVar] = {
-        __type: 'text_surface',
-        text: textVal,
-        fontFamily: fontObj.family,
-        fontSize: fontObj.size,
-        rgb,
-      };
-      return;
-    }
-
-    // 6d. Workspace PNG images (`img = pygame.image.load("assets/ship.png")`) & WAV sounds (`snd = pygame.mixer.Sound("assets/boop.wav")`)
-    const imageLoadMatch = stmt.match(
-      /^([a-zA-Z_]\w*)\s*=\s*pygame\.image\.load\s*\(\s*(.+?)\s*\)(?:\.convert(?:_alpha)?\(\))?$/
-    );
-    if (imageLoadMatch) {
-      const [, imgVar, pathExpr] = imageLoadMatch;
-      const assetPath = String(this.evalExpr(pathExpr.trim(), env, lineNum));
-      const dataUrl = this.resolveWorkspaceAsset(assetPath);
-      env[imgVar] = { __type: 'image_surface', path: assetPath, dataUrl };
-      if (dataUrl) this.getOrLoadImage(assetPath, dataUrl);
-      return;
-    }
-
-    const soundLoadMatch = stmt.match(
-      /^([a-zA-Z_]\w*)\s*=\s*pygame\.mixer\.Sound\s*\(\s*(.+?)\s*\)$/
-    );
-    if (soundLoadMatch) {
-      const [, sndVar, pathExpr] = soundLoadMatch;
-      const assetPath = String(this.evalExpr(pathExpr.trim(), env, lineNum));
-      const dataUrl = this.resolveWorkspaceAsset(assetPath);
-      env[sndVar] = { __type: 'sound', path: assetPath, dataUrl };
-      return;
-    }
-
-    const soundPlayCall = stmt.match(/^([a-zA-Z_]\w*)\.play\s*\(\s*\)$/);
-    if (soundPlayCall) {
-      const sndObj = env[soundPlayCall[1]];
-      if (sndObj && sndObj.__type === 'sound') {
-        const freshUrl = this.resolveWorkspaceAsset(sndObj.path) || sndObj.dataUrl;
-        if (freshUrl) this.playWorkspaceWav(sndObj.path, freshUrl);
-      }
-      return;
-    }
-
-    const playSoundHelper = stmt.match(/^play_sound\s*\(\s*(.+?)\s*\)$/);
-    if (playSoundHelper) {
-      const assetPath = String(this.evalExpr(playSoundHelper[1].trim(), env, lineNum));
-      const dataUrl = this.resolveWorkspaceAsset(assetPath);
-      if (dataUrl) this.playWorkspaceWav(assetPath, dataUrl);
-      return;
-    }
-
-    const blitMatch = stmt.match(/^\w+\.blit\s*\(\s*([a-zA-Z_]\w*)\s*,\s*\(([^)]+)\)\s*\)$/);
-    if (blitMatch) {
-      const [, surfVar, posExpr] = blitMatch;
-      const surfObj = env[surfVar];
-      if (surfObj && surfObj.__type === 'text_surface') {
-        const coords = posExpr.split(',').map((s) => Number(this.evalExpr(s.trim(), env, lineNum)));
-        this.ctx.font = `bold ${surfObj.fontSize}px ${surfObj.fontFamily}, monospace`;
-        this.ctx.fillStyle = `rgb(${surfObj.rgb[0]}, ${surfObj.rgb[1]}, ${surfObj.rgb[2]})`;
-        this.ctx.textBaseline = 'top';
-        this.ctx.fillText(surfObj.text, coords[0] || 0, coords[1] || 0);
-      } else if (surfObj && surfObj.__type === 'image_surface') {
-        const coords = posExpr.split(',').map((s) => Number(this.evalExpr(s.trim(), env, lineNum)));
-        const freshUrl = this.resolveWorkspaceAsset(surfObj.path) || surfObj.dataUrl;
-        if (freshUrl) {
-          const img = this.getOrLoadImage(surfObj.path, freshUrl);
-          if (img && img.complete && img.naturalWidth > 0) {
-            this.ctx.imageSmoothingEnabled = false;
-            this.ctx.drawImage(img, coords[0] || 0, coords[1] || 0);
-          }
-        }
-      }
-      return;
-    }
-
-    const drawTextMatch = stmt.match(
-      /^draw_text\s*\(\s*\w+\s*,\s*(.+?)\s*,\s*([^,]+)\s*,\s*([^,)]+)(?:\s*,\s*([^,)]+))?(?:\s*,\s*(\([^)]+\)|\w+))?\s*\)$/
-    );
-    if (drawTextMatch) {
-      const textVal = String(this.evalExpr(drawTextMatch[1].trim(), env, lineNum));
-      const x = Number(this.evalExpr(drawTextMatch[2].trim(), env, lineNum)) || 0;
-      const y = Number(this.evalExpr(drawTextMatch[3].trim(), env, lineNum)) || 0;
-      const size = drawTextMatch[4] ? Number(this.evalExpr(drawTextMatch[4].trim(), env, lineNum)) : 18;
-      const rgb = drawTextMatch[5]
-        ? this.parseColorTuple(drawTextMatch[5].trim(), env, lineNum)
-        : [248, 250, 252];
-      this.ctx.font = `bold ${size}px "JetBrains Mono", monospace`;
-      this.ctx.fillStyle = `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
-      this.ctx.textBaseline = 'top';
-      this.ctx.fillText(textVal, x, y);
-      return;
-    }
-
-    // 7. Compound assignment (`x += dx`, `y -= speed`)
-    const compoundMatch = stmt.match(/^([a-zA-Z_]\w*)\s*(\+=|-=|\*=)\s*(.+)$/);
-    if (compoundMatch) {
-      const [, varName, op, rhs] = compoundMatch;
-      if (!(varName in env)) {
-        throw new Error(`Line ${lineNum}: NameError: name '${varName}' is not defined`);
-      }
-      const val = Number(this.evalExpr(rhs.trim(), env, lineNum));
-      if (op === '+=') env[varName] += val;
-      if (op === '-=') env[varName] -= val;
-      if (op === '*=') env[varName] *= val;
-      return;
-    }
-
-    // 8. Variable or tuple assignment (`x = 200`, `color = (255, 0, 0)`, or `x, y = 200, 140`)
-    const assignMatch = stmt.match(/^([a-zA-Z_][\w,\s]*)\s*=\s*(.+)$/);
-    if (assignMatch) {
-      const lhs = assignMatch[1].trim();
-      const rhs = assignMatch[2].trim();
-
-      if (!lhs.includes(',') && rhs.startsWith('(') && rhs.endsWith(')')) {
-        const inner = rhs.slice(1, -1);
-        env[lhs] = inner.split(',').map((s) => Number(this.evalExpr(s.trim(), env, lineNum)));
-        return;
-      }
-
-      if (lhs.includes(',')) {
-        const names = lhs.split(',').map((s) => s.trim());
-        const cleanRhs = rhs.startsWith('(') && rhs.endsWith(')') ? rhs.slice(1, -1) : rhs;
-        const vals = cleanRhs.split(',').map((s) => this.evalExpr(s.trim(), env, lineNum));
-        names.forEach((n, idx) => {
-          env[n] = vals[idx];
-        });
-      } else {
-        env[lhs] = this.evalExpr(rhs, env, lineNum);
-      }
-      return;
-    }
-
-    // 9. Catch unrecognized or misspelled statements/calls so they never fail silently!
-    if (/^pygame\.draw\.(\w+)/.test(stmt)) {
-      const fnName = stmt.match(/^pygame\.draw\.(\w+)/)?.[1] || '';
-      if (!['circle', 'rect', 'line'].includes(fnName)) {
-        throw new Error(
-          `Line ${lineNum}: AttributeError: module 'pygame.draw' has no function '${fnName}' (try circle, rect, or line)`
-        );
-      }
-      throw new Error(
-        `Line ${lineNum}: TypeError: Check the arguments passed to 'pygame.draw.${fnName}(...)' — did you include screen, color (R, G, B), and position/size?`
-      );
-    }
-
-    if (/^([a-zA-Z_]\w*)\s*\(/.test(stmt)) {
-      const fnName = stmt.match(/^([a-zA-Z_]\w*)\s*\(/)?.[1] || stmt;
-      throw new Error(`Line ${lineNum}: NameError: function '${fnName}' is not defined`);
-    }
-
-    throw new Error(`Line ${lineNum}: SyntaxError: Python could not understand '${stmt}'`);
-  }
-
-  private parseColorTuple(expr: string, env: Record<string, any>, lineNum: number): [number, number, number] {
-    if (expr in env && Array.isArray(env[expr])) {
-      const arr = env[expr];
-      return [Number(arr[0]) || 0, Number(arr[1]) || 0, Number(arr[2]) || 0];
-    }
-    const clean = expr.replace(/^\(|\)$/g, '');
-    const parts = clean.split(',').map((s) => Number(this.evalExpr(s.trim(), env, lineNum)));
-    return [parts[0] || 0, parts[1] || 0, parts[2] || 0];
-  }
-
-  private evalCondition(cond: string, env: Record<string, any>, lineNum: number): boolean {
-    // Check for unknown or misspelled `pygame.K_*` key names
-    const keyConstMatch = cond.match(/pygame\.(K_[A-Za-z0-9_]+)/);
-    if (keyConstMatch) {
-      const keyConst = keyConstMatch[1];
-      const validKeys = ['K_LEFT', 'K_RIGHT', 'K_UP', 'K_DOWN', 'K_SPACE', 'K_a', 'K_d', 'K_w', 'K_s'];
-      if (!validKeys.includes(keyConst)) {
-        throw new Error(
-          `Line ${lineNum}: AttributeError: 'pygame.${keyConst}' is not a recognized key (try K_LEFT, K_RIGHT, K_UP, K_DOWN, or K_SPACE)`
-        );
-      }
-    }
-
-    if (cond.includes('K_LEFT') || cond.includes('K_a')) return this.pressedKeys.has('ArrowLeft') || this.pressedKeys.has('KeyA');
-    if (cond.includes('K_RIGHT') || cond.includes('K_d')) return this.pressedKeys.has('ArrowRight') || this.pressedKeys.has('KeyD');
-    if (cond.includes('K_UP') || cond.includes('K_w')) return this.pressedKeys.has('ArrowUp') || this.pressedKeys.has('KeyW');
-    if (cond.includes('K_DOWN') || cond.includes('K_s')) return this.pressedKeys.has('ArrowDown') || this.pressedKeys.has('KeyS');
-    if (cond.includes('K_SPACE')) return this.pressedKeys.has('Space');
-    if (cond.includes('pygame.QUIT')) return false;
-
-    if (cond.includes(' or ')) {
-      return cond.split(' or ').some((part) => this.evalCondition(part.trim(), env, lineNum));
-    }
-    if (cond.includes(' and ')) {
-      return cond.split(' and ').every((part) => this.evalCondition(part.trim(), env, lineNum));
-    }
-
-    const cmpMatch = cond.match(/^(.+?)\s*(<=|>=|==|!=|<|>)\s*(.+)$/);
-    if (cmpMatch) {
-      const left = Number(this.evalExpr(cmpMatch[1].trim(), env, lineNum));
-      const op = cmpMatch[2];
-      const right = Number(this.evalExpr(cmpMatch[3].trim(), env, lineNum));
-      if (op === '<') return left < right;
-      if (op === '>') return left > right;
-      if (op === '<=') return left <= right;
-      if (op === '>=') return left >= right;
-      if (op === '==') return left === right;
-      if (op === '!=') return left !== right;
-    }
-    return Boolean(env[cond]);
-  }
-
-  private evalExpr(expr: string, env: Record<string, any>, lineNum: number): any {
-    // Support string concatenation with `+`
-    if (expr.includes('+') && (expr.includes('"') || expr.includes("'") || expr.includes('str('))) {
-      return expr
-        .split('+')
-        .map((part) => {
-          const p = part.trim();
-          const strCall = p.match(/^str\s*\((.+)\)$/);
-          if (strCall) {
-            return String(this.evalExpr(strCall[1].trim(), env, lineNum));
-          }
-          const val = this.evalExpr(p, env, lineNum);
-          // In Python, `"Score: " + 5` (without `str(5)`) raises TypeError!
-          if (typeof val === 'number' && !p.startsWith('"') && !p.startsWith("'")) {
-            throw new Error(
-              `Line ${lineNum}: TypeError: can only concatenate str (not "int") to str — wrap numbers in str(${p}) when joining with text!`
-            );
-          }
-          return String(val);
-        })
-        .join('');
-    }
-
-    if (
-      (expr.startsWith('"') && expr.endsWith('"')) ||
-      (expr.startsWith("'") && expr.endsWith("'"))
-    ) {
-      return expr.slice(1, -1);
-    }
-    if (expr === 'True') return true;
-    if (expr === 'False') return false;
-    if (!Number.isNaN(Number(expr))) return Number(expr);
-
-    const substituted = expr.replace(/\b[a-zA-Z_]\w*\b/g, (ident) => {
-      if (ident in env) return String(env[ident]);
-      if (lineNum > 0) {
-        throw new Error(`Line ${lineNum}: NameError: name '${ident}' is not defined`);
-      }
-      return '0';
+    worker.postMessage({
+      type: 'RUN',
+      code,
+      filename,
+      workspaceFiles: pyFiles,
+      imgSizes,
+      pyodideBaseUrl: this.getPyodideBaseUrl(),
     });
+  }
 
-    try {
-      if (/^[\d\s+\-*/().]+$/.test(substituted)) {
-        const res = Function(`"use strict"; return (${substituted});`)();
-        if (res === Infinity || res === -Infinity || Number.isNaN(res)) {
-          throw new Error(`Line ${lineNum}: ZeroDivisionError: division by zero`);
-        }
-        return res;
-      }
-    } catch (err: any) {
-      if (err?.message?.includes('ZeroDivisionError')) throw err;
+  // ===========================================================================
+  // 2D CANVAS FRAME COMMAND RENDERER
+  // ===========================================================================
+
+  private toCssColor(color: any): string {
+    if (typeof color === 'string') return color;
+    if (Array.isArray(color)) {
+      const r = Number(color[0]) || 0;
+      const g = Number(color[1]) || 0;
+      const b = Number(color[2]) || 0;
+      const a = color.length >= 4 ? (Number(color[3]) ?? 255) / 255 : 1;
+      return a < 1 ? `rgba(${r}, ${g}, ${b}, ${a})` : `rgb(${r}, ${g}, ${b})`;
     }
-    return substituted;
+    return '#ffffff';
+  }
+
+  private renderFrameCommands(commands: any[]): void {
+    const ctx = this.ctx;
+
+    for (const cmd of commands) {
+      const op = cmd[0];
+      if (op === 'resize') {
+        const w = Math.max(100, Math.min(1200, Number(cmd[1]) || 400));
+        const h = Math.max(100, Math.min(900, Number(cmd[2]) || 280));
+        if (this.canvas.width !== w || this.canvas.height !== h) {
+          this.canvas.width = w;
+          this.canvas.height = h;
+        }
+      } else if (op === 'fill') {
+        ctx.fillStyle = this.toCssColor(cmd[1]);
+        ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+      } else if (op === 'circle') {
+        const [, color, cx, cy, radius, width] = cmd;
+        ctx.beginPath();
+        ctx.arc(cx, cy, Math.max(0.5, radius), 0, Math.PI * 2);
+        if (width && width > 0) {
+          ctx.strokeStyle = this.toCssColor(color);
+          ctx.lineWidth = width;
+          ctx.stroke();
+        } else {
+          ctx.fillStyle = this.toCssColor(color);
+          ctx.fill();
+        }
+      } else if (op === 'rect') {
+        const [, color, x, y, w, h, width, borderRadius] = cmd;
+        ctx.beginPath();
+        if (borderRadius && borderRadius > 0 && typeof ctx.roundRect === 'function') {
+          ctx.roundRect(x, y, w, h, borderRadius);
+        } else {
+          ctx.rect(x, y, w, h);
+        }
+        if (width && width > 0) {
+          ctx.strokeStyle = this.toCssColor(color);
+          ctx.lineWidth = width;
+          ctx.stroke();
+        } else {
+          ctx.fillStyle = this.toCssColor(color);
+          ctx.fill();
+        }
+      } else if (op === 'line') {
+        const [, color, x1, y1, x2, y2, width] = cmd;
+        ctx.strokeStyle = this.toCssColor(color);
+        ctx.lineWidth = Math.max(1, width || 1);
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+      } else if (op === 'lines' || op === 'polygon') {
+        const [, color, points, width] = cmd;
+        if (!Array.isArray(points) || points.length < 2) continue;
+        ctx.beginPath();
+        ctx.moveTo(points[0][0], points[0][1]);
+        for (let i = 1; i < points.length; i++) {
+          ctx.lineTo(points[i][0], points[i][1]);
+        }
+        if (op === 'polygon') ctx.closePath();
+        if (op === 'lines' || (width && width > 0)) {
+          ctx.strokeStyle = this.toCssColor(color);
+          ctx.lineWidth = Math.max(1, width || 1);
+          ctx.stroke();
+        } else {
+          ctx.fillStyle = this.toCssColor(color);
+          ctx.fill();
+        }
+      } else if (op === 'ellipse') {
+        const [, color, x, y, w, h, width] = cmd;
+        ctx.beginPath();
+        ctx.ellipse(x + w / 2, y + h / 2, Math.abs(w / 2), Math.abs(h / 2), 0, 0, Math.PI * 2);
+        if (width && width > 0) {
+          ctx.strokeStyle = this.toCssColor(color);
+          ctx.lineWidth = width;
+          ctx.stroke();
+        } else {
+          ctx.fillStyle = this.toCssColor(color);
+          ctx.fill();
+        }
+      } else if (op === 'text') {
+        const [, text, x, y, size, color, family] = cmd;
+        ctx.font = `bold ${size || 18}px ${family || 'monospace'}, monospace`;
+        ctx.fillStyle = this.toCssColor(color);
+        ctx.textBaseline = 'top';
+        ctx.fillText(String(text), x, y);
+      } else if (op === 'image') {
+        const [, path, x, y, w, h, flipX, flipY, angle] = cmd;
+        const dataUrl = this.resolveWorkspaceAsset(path);
+        if (dataUrl) {
+          const img = this.getOrLoadImage(path, dataUrl);
+          if (img.complete && img.naturalWidth > 0) {
+            ctx.save();
+            ctx.imageSmoothingEnabled = false;
+            ctx.translate(x + w / 2, y + h / 2);
+            if (angle) ctx.rotate((-angle * Math.PI) / 180);
+            ctx.scale(flipX ? -1 : 1, flipY ? -1 : 1);
+            ctx.drawImage(img, -w / 2, -h / 2, w, h);
+            ctx.restore();
+          }
+        }
+      } else if (op === 'sprite') {
+        const [, spIdx, x, y, scale, sheetName] = cmd;
+        this.renderProjectSprite(spIdx, x, y, scale, sheetName || undefined);
+      } else if (op === 'tilemap') {
+        const [, scale, mapName] = cmd;
+        this.renderProjectTilemap(scale, mapName || undefined);
+      }
+    }
   }
 
   private resolveWorkspaceAsset(assetPath: string): string | null {
@@ -658,17 +577,19 @@ export class PythonPygameRuntime {
     return img;
   }
 
-  private playWorkspaceWav(key: string, dataUrl: string): void {
+  private playWorkspaceSound(path: string, volume = 0.7): void {
+    const dataUrl = this.resolveWorkspaceAsset(path);
+    if (!dataUrl) return;
     const now = performance.now();
-    const last = this.lastSoundPlayAt.get(key) || 0;
-    if (now - last < 45) return; // Prevent rapid-fire frame spam
-    this.lastSoundPlayAt.set(key, now);
+    const last = this.lastSoundPlayAt.get(path) || 0;
+    if (now - last < 45) return;
+    this.lastSoundPlayAt.set(path, now);
     try {
       const audio = new Audio(dataUrl);
-      audio.volume = 0.7;
+      audio.volume = Math.max(0, Math.min(1, volume));
       audio.play().catch(() => {});
     } catch {
-      // Ignore autoplay errors
+      // Ignore autoplay restriction
     }
   }
 
@@ -725,34 +646,5 @@ export class PythonPygameRuntime {
         }
       }
     }
-  }
-
-  private reportPythonError(rawMsg: string): void {
-    // 1. Built-in runner error format: `Line 36: NameError: ...`
-    const lineMatch = rawMsg.match(/Line (\d+):\s*(.+)/);
-    if (lineMatch) {
-      this.callbacks.onStderr(rawMsg, {
-        line: Number(lineMatch[1]),
-        message: lineMatch[2],
-      });
-      return;
-    }
-
-    // 2. Full CPython / Pyodide multi-line traceback format: `File "<exec>", line 14, in <module>`
-    const pyodideLineMatches = [...rawMsg.matchAll(/line (\d+)/gi)];
-    const lastLineNum =
-      pyodideLineMatches.length > 0
-        ? Number(pyodideLineMatches[pyodideLineMatches.length - 1][1])
-        : 1;
-    const nonEmptyLines = rawMsg
-      .split('\n')
-      .map((l) => l.trim())
-      .filter(Boolean);
-    const summaryLine = nonEmptyLines[nonEmptyLines.length - 1] || rawMsg;
-
-    this.callbacks.onStderr(rawMsg, {
-      line: lastLineNum,
-      message: summaryLine,
-    });
   }
 }

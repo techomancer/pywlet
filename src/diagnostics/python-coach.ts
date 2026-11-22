@@ -215,28 +215,39 @@ export function analyzePythonCodeForLearners(code: string): PythonDiagnostic[] {
       });
     }
 
-    // 4. Check for indentation right after a `:` line
-    if (codeTrimmed.endsWith(':') && i + 1 < lines.length) {
-      const currentIndent = rawLine.search(/\S|$/);
-      // Find next non-empty, non-comment line
-      for (let j = i + 1; j < lines.length; j++) {
-        const nextRaw = lines[j];
-        const nextTrim = stripStringsAndComments(nextRaw).withoutComment.trim();
-        if (!nextTrim) continue;
-        const nextIndent = nextRaw.search(/\S|$/);
-        if (nextIndent <= currentIndent) {
-          diagnostics.push({
-            line: j + 1,
-            column: 1,
-            endColumn: nextRaw.length + 1,
-            severity: 'error',
-            title: 'Expected indented block',
-            friendlyExplanation: `Because line ${lineNum} ends with a colon \`:\`, line ${
-              j + 1
-            } needs to be indented (press Tab or add 4 spaces) so Python knows it's inside the block!`,
-          });
+    // 4. Check for stray colon on non-block statements OR missing indentation after real block headers
+    if (codeTrimmed.endsWith(':')) {
+      if (!BLOCK_KEYWORDS.test(codeTrimmed) && !codeTrimmed.startsWith('case ') && !codeTrimmed.startsWith('match ')) {
+        const colonCol = rawLine.lastIndexOf(':') + 1;
+        diagnostics.push({
+          line: lineNum,
+          column: Math.max(1, colonCol),
+          endColumn: Math.max(2, colonCol + 1),
+          severity: 'error',
+          title: `Unexpected colon ':' on line ${lineNum}`,
+          friendlyExplanation: `There is an extra colon \`:\` at the end of line ${lineNum}. Only block headers like \`if\`, \`while\`, \`for\`, \`def\`, or \`else\` should end with \`:\`!`,
+        });
+      } else if (i + 1 < lines.length) {
+        const currentIndent = rawLine.search(/\S|$/);
+        for (let j = i + 1; j < lines.length; j++) {
+          const nextRaw = lines[j];
+          const nextTrim = stripStringsAndComments(nextRaw).withoutComment.trim();
+          if (!nextTrim) continue;
+          const nextIndent = nextRaw.search(/\S|$/);
+          if (nextIndent <= currentIndent) {
+            diagnostics.push({
+              line: j + 1,
+              column: 1,
+              endColumn: nextRaw.length + 1,
+              severity: 'error',
+              title: 'Expected indented block',
+              friendlyExplanation: `Because line ${lineNum} ends with a colon \`:\`, line ${
+                j + 1
+              } needs to be indented (press Tab or add 4 spaces) so Python knows it's inside the block!`,
+            });
+          }
+          break;
         }
-        break;
       }
     }
   }

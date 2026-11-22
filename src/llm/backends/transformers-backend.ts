@@ -2,7 +2,7 @@ import type { ChatMessage, LLMBackend, LLMDebugEvent, LLMProgressEvent } from '.
 
 export class TransformersJsBackend implements LLMBackend {
   readonly id = 'transformers-js' as const;
-  readonly displayName = 'Transformers.js (Qwen2.5 Local)';
+  readonly displayName = 'Transformers.js (Qwen 1.5B Local)';
 
   private worker: Worker | null = null;
   private ready = false;
@@ -10,7 +10,7 @@ export class TransformersJsBackend implements LLMBackend {
   private debugListener?: (event: LLMDebugEvent) => void;
   private progressListener?: (event: LLMProgressEvent) => void;
 
-  constructor(modelId = 'onnx-community/Qwen2.5-Coder-0.5B-Instruct') {
+  constructor(modelId = 'onnx-community/Qwen2.5-Coder-1.5B-Instruct') {
     this.modelId = modelId;
   }
 

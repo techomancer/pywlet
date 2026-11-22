@@ -83,6 +83,7 @@ async function purgePoisonedLocalCache(): Promise<void> {
 async function probeWebGPU(): Promise<{
   available: boolean;
   isSoftwareAdapter: boolean;
+  supportsF16: boolean;
   adapterLabel: string;
   reason?: string;
 }> {
@@ -91,6 +92,7 @@ async function probeWebGPU(): Promise<{
     return {
       available: false,
       isSoftwareAdapter: false,
+      supportsF16: false,
       adapterLabel: 'No navigator.gpu API',
       reason: 'WebGPU API not exposed by browser (enable via chrome://flags)',
     };
@@ -144,9 +146,11 @@ async function probeWebGPU(): Promise<{
     );
 
     if (hardwareCandidate) {
+      const supportsF16 = Boolean(hardwareCandidate.ad?.features?.has?.('shader-f16'));
       return {
         available: true,
         isSoftwareAdapter: false,
+        supportsF16,
         adapterLabel: hardwareCandidate.label,
       };
     }
@@ -157,6 +161,7 @@ async function probeWebGPU(): Promise<{
       return {
         available: false,
         isSoftwareAdapter: false,
+        supportsF16: false,
         adapterLabel: 'null WebGPU Adapter',
         reason:
           'navigator.gpu.requestAdapter() returned null for all preferences (check chrome://gpu for Vulkan status)',
@@ -166,6 +171,7 @@ async function probeWebGPU(): Promise<{
     return {
       available: false,
       isSoftwareAdapter: true,
+      supportsF16: false,
       adapterLabel: firstAny.label,
       reason: `Chrome returned software WebGPU (${firstAny.label}). Check the Adapter dump in the debug log above!`,
     };
@@ -173,16 +179,24 @@ async function probeWebGPU(): Promise<{
     return {
       available: false,
       isSoftwareAdapter: false,
+      supportsF16: false,
       adapterLabel: 'WebGPU Error',
       reason: err?.message || String(err),
     };
   }
 }
 
+function formatOrtError(err: any): string {
+  if (typeof err === 'number' || (typeof err === 'string' && /^\d{7,}$/.test(err.trim()))) {
+    return `ONNX Runtime native error (${err}) — likely browser WASM/WebGPU memory limit for this model size. Try Chrome Prompt API (Gemma 4 / Nano) or Local Ollama in ⚙️ AI Setup.`;
+  }
+  return err?.message || String(err);
+}
+
 let generator: any = null;
 let activeDevice: 'webgpu' | 'wasm' = 'wasm';
 let activeAdapterLabel = 'CPU (SIMD WASM)';
-let currentModelId = 'onnx-community/Qwen2.5-Coder-0.5B-Instruct';
+let currentModelId = 'onnx-community/Qwen2.5-Coder-1.5B-Instruct';
 
 self.onmessage = async (event: MessageEvent) => {
   const { type, payload } = event.data;
@@ -250,31 +264,62 @@ self.onmessage = async (event: MessageEvent) => {
       });
 
       const loadStart = performance.now();
+      // Prefer q4f16 on WebGPU with shader-f16 (smaller memory footprint & faster for 1.5B models!)
+      const preferredDtype =
+        activeDevice === 'webgpu' && gpu.supportsF16 ? 'q4f16' : 'q4';
+
+      const progressCallback = (info: any) => {
+        if (info.status === 'progress' && typeof info.progress === 'number') {
+          self.postMessage({
+            type: 'PROGRESS',
+            payload: {
+              status: 'downloading',
+              message: `Caching ${info.file}: ${Math.round(info.progress)}%`,
+              percent: Math.round(info.progress),
+            },
+          });
+        } else if (info.status === 'ready') {
+          postDebug('model-load', `Pipeline ready on ${activeAdapterLabel} (${preferredDtype})`);
+        }
+      };
 
       try {
+        postDebug('model-load', `Loading ${currentModelId} on ${activeDevice} with dtype=${preferredDtype}`);
         generator = await pipeline('text-generation', currentModelId, {
           device: activeDevice,
-          dtype: 'q4',
-          progress_callback: (info: any) => {
-            if (info.status === 'progress' && typeof info.progress === 'number') {
-              self.postMessage({
-                type: 'PROGRESS',
-                payload: {
-                  status: 'downloading',
-                  message: `Caching ${info.file}: ${Math.round(info.progress)}%`,
-                  percent: Math.round(info.progress),
-                },
-              });
-            } else if (info.status === 'ready') {
-              postDebug('model-load', `Pipeline ready on ${activeAdapterLabel}`);
-            }
-          },
+          dtype: preferredDtype,
+          progress_callback: progressCallback,
         });
-      } catch (webgpuErr: any) {
-        if (activeDevice === 'webgpu') {
+      } catch (firstErr: any) {
+        if (activeDevice === 'webgpu' && preferredDtype === 'q4f16') {
           postDebug(
             'model-load',
-            `WebGPU pipeline init failed (${webgpuErr?.message || webgpuErr}); falling back to SIMD WASM...`,
+            `WebGPU q4f16 failed (${formatOrtError(firstErr)}); retrying WebGPU with q4...`
+          );
+          try {
+            generator = await pipeline('text-generation', currentModelId, {
+              device: 'webgpu',
+              dtype: 'q4',
+              progress_callback: progressCallback,
+            });
+          } catch (webgpuErr: any) {
+            postDebug(
+              'model-load',
+              `WebGPU pipeline init failed (${formatOrtError(webgpuErr)}); falling back to SIMD WASM...`,
+              { device: 'wasm', webgpuAvailable: false }
+            );
+            activeDevice = 'wasm';
+            activeAdapterLabel = `SIMD WASM (${threads} threads)`;
+            generator = await pipeline('text-generation', currentModelId, {
+              device: 'wasm',
+              dtype: 'q4',
+              progress_callback: progressCallback,
+            });
+          }
+        } else if (activeDevice === 'webgpu') {
+          postDebug(
+            'model-load',
+            `WebGPU pipeline init failed (${formatOrtError(firstErr)}); falling back to SIMD WASM...`,
             { device: 'wasm', webgpuAvailable: false }
           );
           activeDevice = 'wasm';
@@ -283,9 +328,10 @@ self.onmessage = async (event: MessageEvent) => {
           generator = await pipeline('text-generation', currentModelId, {
             device: 'wasm',
             dtype: 'q4',
+            progress_callback: progressCallback,
           });
         } else {
-          throw webgpuErr;
+          throw firstErr;
         }
       }
 
@@ -305,12 +351,13 @@ self.onmessage = async (event: MessageEvent) => {
         },
       });
     } catch (err: any) {
-      postDebug('error', `Model load failed: ${err?.message || String(err)}`);
+      const readable = formatOrtError(err);
+      postDebug('error', `Model load failed: ${readable}`);
       self.postMessage({
         type: 'ERROR',
         payload: {
           status: 'error',
-          message: `Transformers.js load error: ${err?.message || String(err)}`,
+          message: `Transformers.js load error: ${readable}`,
         },
       });
     }
@@ -394,7 +441,7 @@ self.onmessage = async (event: MessageEvent) => {
       });
 
       const output = await generator(messages, {
-        max_new_tokens: 110,
+        max_new_tokens: 200,
         do_sample: false,
         streamer,
       });

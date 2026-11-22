@@ -11,7 +11,8 @@
   },
   "dependencies": {
     "@huggingface/transformers": "^3.3.3",
-    "monaco-editor": "^0.52.2"
+    "monaco-editor": "^0.52.2",
+    "pyodide": "^314.0.8"
   },
   "devDependencies": {
     "typescript": "^5.7.2",

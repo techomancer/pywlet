@@ -36,6 +36,7 @@ export class TutorService {
   private backends: Map<LLMBackendId, LLMBackend> = new Map();
   private currentBackend: LLMBackend;
   private transformersBackend: TransformersJsBackend;
+  private ollamaBackend: OllamaLocalBackend;
   private chatHistory: ChatMessage[] = [];
   private onProgress?: (event: LLMProgressEvent) => void;
   private onDebug?: (event: LLMDebugEvent) => void;
@@ -47,19 +48,27 @@ export class TutorService {
     this.onProgress = onProgress;
     this.onDebug = onDebug;
 
-    this.transformersBackend = new TransformersJsBackend();
+    this.transformersBackend = new TransformersJsBackend('onnx-community/Qwen2.5-Coder-1.5B-Instruct');
     const chromePrompt = new ChromePromptBackend();
-    const ollama = new OllamaLocalBackend();
+    this.ollamaBackend = new OllamaLocalBackend();
 
     this.backends.set(this.transformersBackend.id, this.transformersBackend);
     this.backends.set(chromePrompt.id, chromePrompt);
-    this.backends.set(ollama.id, ollama);
+    this.backends.set(this.ollamaBackend.id, this.ollamaBackend);
 
     this.currentBackend = this.transformersBackend;
   }
 
   probeGPU(): void {
     this.transformersBackend.probeGPU(this.onDebug);
+  }
+
+  setLocalServerUrl(url: string): void {
+    this.ollamaBackend.setBaseUrl(url);
+  }
+
+  getLocalServerUrl(): string {
+    return this.ollamaBackend.getBaseUrl();
   }
 
   getActiveBackend(): LLMBackend {

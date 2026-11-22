@@ -1,7 +1,79 @@
 import { createHash } from 'node:crypto';
-import { readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { defineConfig, type Plugin } from 'vite';
+
+const PYODIDE_RUNTIME_FILES = [
+  'pyodide.mjs',
+  'pyodide.asm.mjs',
+  'pyodide.asm.wasm',
+  'python_stdlib.zip',
+  'pyodide-lock.json',
+] as const;
+
+function getPyodideContentType(filename: string): string {
+  if (filename.endsWith('.wasm')) return 'application/wasm';
+  if (filename.endsWith('.mjs') || filename.endsWith('.js')) return 'application/javascript; charset=utf-8';
+  if (filename.endsWith('.json')) return 'application/json; charset=utf-8';
+  if (filename.endsWith('.zip')) return 'application/zip';
+  return 'application/octet-stream';
+}
+
+/**
+ * Self-hosts Pyodide's core WebAssembly + stdlib files from `node_modules/pyodide/`
+ * under `<base>pyodide/` during both `vite dev` and `vite build` so real CPython runs
+ * 100% same-origin and offline without any external CDN dependency.
+ */
+function pyodideAssetsPlugin(): Plugin {
+  let outDir = 'dist';
+  let base = '/';
+
+  return {
+    name: 'pywlet-pyodide-assets',
+    configResolved(config) {
+      outDir = config.build.outDir || 'dist';
+      base = config.base || '/';
+    },
+    configureServer(server) {
+      const pyodideSrcDir = join(process.cwd(), 'node_modules', 'pyodide');
+      const prefix = `${base}pyodide/`;
+      server.middlewares.use((req, res, next) => {
+        const rawUrl = (req.url || '').split('?')[0];
+        if (!rawUrl.startsWith(prefix)) {
+          next();
+          return;
+        }
+        const relName = rawUrl.slice(prefix.length);
+        if (!PYODIDE_RUNTIME_FILES.includes(relName as any)) {
+          next();
+          return;
+        }
+        const fullPath = join(pyodideSrcDir, relName);
+        if (!existsSync(fullPath)) {
+          next();
+          return;
+        }
+        res.setHeader('Content-Type', getPyodideContentType(relName));
+        res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+        res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
+        res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+        res.end(readFileSync(fullPath));
+      });
+    },
+    closeBundle() {
+      const pyodideSrcDir = join(process.cwd(), 'node_modules', 'pyodide');
+      const pyodideDestDir = join(process.cwd(), outDir, 'pyodide');
+      if (!existsSync(pyodideSrcDir)) return;
+      mkdirSync(pyodideDestDir, { recursive: true });
+      for (const file of PYODIDE_RUNTIME_FILES) {
+        const src = join(pyodideSrcDir, file);
+        if (existsSync(src)) {
+          copyFileSync(src, join(pyodideDestDir, file));
+        }
+      }
+    },
+  };
+}
 
 function normalizeBasePath(raw?: string): string {
   if (!raw) return '/';
@@ -64,10 +136,10 @@ function pywletPwaPlugin(): Plugin {
         if (file === 'manifest.webmanifest' || file.startsWith('icons/')) {
           corePrecache.push(`./${file}`);
         } else if (
-          /^assets\/(index|python|transformers\.worker|ort-wasm-.*)-[^/]+\.(js|css|mjs)$/.test(file)
+          /^assets\/(index|python|transformers\.worker|pyodide\.worker|ort-wasm-.*)-[^/]+\.(js|css|mjs)$/.test(file)
         ) {
           corePrecache.push(`./${file}`);
-        } else if (/^assets\/ort-wasm-.*\.wasm$/.test(file)) {
+        } else if (/^assets\/ort-wasm-.*\.wasm$/.test(file) || file.startsWith('pyodide/')) {
           backgroundPrecache.push(`./${file}`);
         }
       }
@@ -225,7 +297,7 @@ self.addEventListener('fetch', (event) => {
 
 export default defineConfig({
   base: normalizeBasePath(process.env.VITE_BASE_PATH),
-  plugins: [pywletPwaPlugin()],
+  plugins: [pyodideAssetsPlugin(), pywletPwaPlugin()],
   server: {
     port: 5173,
     headers: {
@@ -245,6 +317,6 @@ export default defineConfig({
     format: 'es',
   },
   optimizeDeps: {
-    exclude: ['@huggingface/transformers'],
+    exclude: ['@huggingface/transformers', 'pyodide'],
   },
 });

@@ -66,10 +66,21 @@ export interface TutorCodeContext {
   cursorLineNumber?: number;
   cursorLineText?: string;
   projectFiles: string[];
+  recentConsole?: string;
   activeError?: {
     line: number;
+    column?: number;
+    endColumn?: number;
     title: string;
     friendlyExplanation: string;
     rawError?: string;
   };
+  allDiagnostics?: Array<{
+    line: number;
+    column: number;
+    endColumn: number;
+    severity: 'error' | 'warning' | 'info';
+    title: string;
+    friendlyExplanation: string;
+  }>;
 }

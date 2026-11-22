@@ -35,6 +35,8 @@ async function bootstrapPywlet(): Promise<void> {
 
   let currentDiagnostics: PythonDiagnostic[] = [];
   let activeBannerDiagnostic: PythonDiagnostic | null = null;
+  let lintDebounceTimer: number | null = null;
+  let lintRequestCounter = 0;
   let workspaceBrowserOpen = false;
   let spriteSheetViewMode: 'visual' | 'code' = 'visual';
   let spriteDataWriteProtected = true;
@@ -115,6 +117,8 @@ async function bootstrapPywlet(): Promise<void> {
   const aiSetupDrawerEl = document.getElementById('ai-setup-drawer')!;
   const tutorMiniStatusEl = document.getElementById('tutor-mini-status')!;
   const llmBackendSelect = document.getElementById('llm-backend-select') as HTMLSelectElement;
+  const localServerConfigRow = document.getElementById('local-server-config-row')!;
+  const inputLocalServerUrl = document.getElementById('input-local-server-url') as HTMLInputElement;
   const btnLoadModel = document.getElementById('btn-load-model')!;
   const llmStatusTextEl = document.getElementById('llm-status-text')!;
   const tutorMessagesEl = document.getElementById('tutor-messages')!;
@@ -291,14 +295,25 @@ async function bootstrapPywlet(): Promise<void> {
     },
     onStatusChange: (status) => {
       if (status === 'running') {
-        runtimeStatusEl.textContent = 'Game Running (60 FPS)';
+        runtimeStatusEl.textContent = 'Python 3.14 Running (60 FPS)';
         runtimeStatusEl.className = 'status-pill status-running';
         btnStop.disabled = false;
         canvasOverlayEl.classList.add('hidden');
+      } else if (status === 'loading') {
+        runtimeStatusEl.textContent = 'Loading Python (Pyodide)...';
+        runtimeStatusEl.className = 'status-pill status-ready';
+        btnStop.disabled = !runtime.isRunning();
       } else {
-        runtimeStatusEl.textContent = 'Python Ready';
+        runtimeStatusEl.textContent = runtime.isPyodideReady() ? 'Python 3.14 Ready' : 'Python Ready';
         runtimeStatusEl.className = 'status-pill status-ready';
         btnStop.disabled = true;
+      }
+    },
+    onPyodideReady: () => {
+      // Immediately run authentic CPython AST lint on the currently open Python file
+      const activeName = workspace.getActiveFileName();
+      if (classifyWorkspaceFile(activeName, workspace.getFileContent(activeName)) === 'python') {
+        runLiveDiagnostics(editor.getValue(), true);
       }
     },
   });
@@ -315,22 +330,55 @@ async function bootstrapPywlet(): Promise<void> {
     diagnosticMessageEl.textContent = diag.friendlyExplanation;
   }
 
-  function runLiveDiagnostics(code: string): void {
-    currentDiagnostics = analyzePythonCodeForLearners(code);
-    editor.setDiagnostics(currentDiagnostics);
+  function applyDiagnosticsToUI(diags: PythonDiagnostic[]): void {
+    currentDiagnostics = diags;
+    editor.setDiagnostics(diags);
 
-    if (currentDiagnostics.length === 0) {
+    if (diags.length === 0) {
       syntaxBadgeEl.textContent = '✓ No Syntax Issues';
       syntaxBadgeEl.className = 'badge badge-ok';
       showDiagnosticBanner(null);
     } else {
-      const first = currentDiagnostics[0];
-      syntaxBadgeEl.textContent = `${currentDiagnostics.length} Hint${
-        currentDiagnostics.length > 1 ? 's' : ''
+      const first = diags[0];
+      syntaxBadgeEl.textContent = `${diags.length} Issue${
+        diags.length > 1 ? 's' : ''
       } (Line ${first.line})`;
       syntaxBadgeEl.className =
         first.severity === 'error' ? 'badge badge-err' : 'badge badge-warn';
       showDiagnosticBanner(first);
+    }
+  }
+
+  function runLiveDiagnostics(code: string, immediate = false): void {
+    const filename = workspace.getActiveFileName();
+    if (lintDebounceTimer !== null) {
+      window.clearTimeout(lintDebounceTimer);
+      lintDebounceTimer = null;
+    }
+
+    // While Pyodide is still booting (first ~1s) or running a 60 FPS game loop,
+    // keep instant feedback via the lightweight fallback coach.
+    if (!runtime.isPyodideReady() || runtime.isRunning()) {
+      applyDiagnosticsToUI(analyzePythonCodeForLearners(code));
+      return;
+    }
+
+    const reqToken = ++lintRequestCounter;
+    const execLint = async () => {
+      const diags = await runtime.lintCode(code, filename);
+      if (reqToken !== lintRequestCounter) return;
+      if (diags !== null) {
+        applyDiagnosticsToUI(diags);
+      }
+    };
+
+    if (immediate) {
+      void execLint();
+    } else {
+      lintDebounceTimer = window.setTimeout(() => {
+        lintDebounceTimer = null;
+        void execLint();
+      }, 160);
     }
   }
 
@@ -694,6 +742,12 @@ async function bootstrapPywlet(): Promise<void> {
       ? editor.getCursorContext()
       : { selectedText: '', cursorWord: '', lineNumber: 1, lineText: '' };
     const firstDiag = activeBannerDiagnostic || currentDiagnostics[0];
+    const consoleLines = (consoleOutputEl.textContent || '')
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean);
+    const recentConsole = consoleLines.slice(-6).join('\n');
+
     return {
       activeFile: isCodeVisible ? activeName : runnable?.filename || activeName,
       fullCode: isCodeVisible ? editor.getValue() : runnable?.code || '',
@@ -702,13 +756,17 @@ async function bootstrapPywlet(): Promise<void> {
       cursorLineNumber: cursor.lineNumber,
       cursorLineText: cursor.lineText,
       projectFiles: workspace.getFileNames(),
+      recentConsole,
       activeError: firstDiag
         ? {
             line: firstDiag.line,
+            column: firstDiag.column,
+            endColumn: firstDiag.endColumn,
             title: firstDiag.title,
             friendlyExplanation: firstDiag.friendlyExplanation,
           }
         : undefined,
+      allDiagnostics: currentDiagnostics.slice(0, 5),
     };
   }
 
@@ -738,8 +796,8 @@ async function bootstrapPywlet(): Promise<void> {
       return;
     }
     syncSpriteProjectFromWorkspace();
-    consoleOutputEl.textContent = `▶ Running ${runnable.filename}...`;
-    runtime.runCode(runnable.code);
+    consoleOutputEl.textContent = `▶ Running ${runnable.filename} (Python 3.14)...`;
+    void runtime.runCode(runnable.code, runnable.filename, workspace.getFiles());
   }
 
   // 7. Wire UI Events & Layout Toggles
@@ -1013,12 +1071,82 @@ async function bootstrapPywlet(): Promise<void> {
     }
   });
 
+  const AI_BACKEND_STORAGE_KEY = 'pywlet_ai_backend_v1';
+  const LOCAL_SERVER_URL_KEY = 'pywlet_local_server_url_v1';
+
+  const syncLocalServerRowVisibility = () => {
+    localServerConfigRow.classList.toggle('hidden', llmBackendSelect.value !== 'ollama-local');
+  };
+
+  try {
+    const savedUrl = localStorage.getItem(LOCAL_SERVER_URL_KEY);
+    if (savedUrl) {
+      inputLocalServerUrl.value = savedUrl;
+      tutor.setLocalServerUrl(savedUrl);
+    }
+  } catch {
+    // Ignore
+  }
+
+  inputLocalServerUrl.addEventListener('change', () => {
+    const url = inputLocalServerUrl.value.trim() || 'http://localhost:11434';
+    tutor.setLocalServerUrl(url);
+    try {
+      localStorage.setItem(LOCAL_SERVER_URL_KEY, url);
+    } catch {
+      // Ignore
+    }
+  });
+
   llmBackendSelect.addEventListener('change', async () => {
     const id = llmBackendSelect.value as LLMBackendId;
+    syncLocalServerRowVisibility();
+    try {
+      localStorage.setItem(AI_BACKEND_STORAGE_KEY, id);
+    } catch {
+      // Ignore storage error
+    }
     await tutor.setBackend(id);
   });
 
+  // Restore saved AI backend, or auto-prefer Chrome Built-in AI (Gemma 4 / Nano) when available
+  const initPreferredBackend = async () => {
+    let preferred: LLMBackendId | null = null;
+    try {
+      const savedRaw = localStorage.getItem(AI_BACKEND_STORAGE_KEY);
+      const saved = (savedRaw === 'transformers-js-1.5b' ? 'transformers-js' : savedRaw) as LLMBackendId | null;
+      if (saved && ['transformers-js', 'chrome-prompt', 'ollama-local'].includes(saved)) {
+        preferred = saved;
+      }
+    } catch {
+      // Ignore
+    }
+    if (!preferred) {
+      const hasChromeBuiltInAI =
+        typeof (globalThis as any).LanguageModel !== 'undefined' ||
+        Boolean((window as any).ai?.languageModel);
+      if (hasChromeBuiltInAI) {
+        preferred = 'chrome-prompt';
+      }
+    }
+    if (preferred && preferred !== llmBackendSelect.value) {
+      llmBackendSelect.value = preferred;
+      await tutor.setBackend(preferred);
+    }
+    syncLocalServerRowVisibility();
+  };
+  void initPreferredBackend();
+
   btnLoadModel.addEventListener('click', async () => {
+    if (llmBackendSelect.value === 'ollama-local') {
+      const url = inputLocalServerUrl.value.trim() || 'http://localhost:11434';
+      tutor.setLocalServerUrl(url);
+      try {
+        localStorage.setItem(LOCAL_SERVER_URL_KEY, url);
+      } catch {
+        // Ignore
+      }
+    }
     try {
       await tutor.initActiveBackend();
     } catch {
@@ -1116,6 +1244,7 @@ async function bootstrapPywlet(): Promise<void> {
   syncSpriteProjectFromWorkspace();
   updateWorkspaceHeaders();
   openActiveFileInEditor(true);
+  runtime.preload();
   initPwa(document.getElementById('btn-install-pwa'));
 
   // Optional kid-friendly UI walkthrough overlay (auto-shows once on first visit)
