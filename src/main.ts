@@ -111,6 +111,9 @@ async function bootstrapPywlet(): Promise<void> {
   const btnClearConsole = document.getElementById('btn-clear-console')!;
 
   // Tutor & AI Debug UI
+  const btnToggleAiSetup = document.getElementById('btn-toggle-ai-setup')!;
+  const aiSetupDrawerEl = document.getElementById('ai-setup-drawer')!;
+  const tutorMiniStatusEl = document.getElementById('tutor-mini-status')!;
   const llmBackendSelect = document.getElementById('llm-backend-select') as HTMLSelectElement;
   const btnLoadModel = document.getElementById('btn-load-model')!;
   const llmStatusTextEl = document.getElementById('llm-status-text')!;
@@ -182,6 +185,26 @@ async function bootstrapPywlet(): Promise<void> {
   const tutor = new TutorService(
     (progress) => {
       llmStatusTextEl.textContent = progress.message;
+      if (progress.status === 'ready') {
+        tutorMiniStatusEl.textContent = '⚡ AI Ready';
+        tutorMiniStatusEl.className = 'badge badge-ok';
+      } else if (progress.status === 'downloading') {
+        tutorMiniStatusEl.textContent =
+          typeof progress.percent === 'number' ? `⬇ ${progress.percent}%` : '⬇ Downloading…';
+        tutorMiniStatusEl.className = 'badge badge-warn';
+      } else if (progress.status === 'loading') {
+        tutorMiniStatusEl.textContent = '⏳ Loading…';
+        tutorMiniStatusEl.className = 'badge badge-warn';
+      } else if (progress.status === 'generating') {
+        tutorMiniStatusEl.textContent = '✨ Thinking…';
+        tutorMiniStatusEl.className = 'badge badge-ok';
+      } else if (progress.status === 'error') {
+        tutorMiniStatusEl.textContent = '⚠️ AI Setup';
+        tutorMiniStatusEl.className = 'badge badge-err';
+      } else {
+        tutorMiniStatusEl.textContent = 'Instant Coach';
+        tutorMiniStatusEl.className = 'badge badge-ok';
+      }
     },
     (debugEvent) => {
       appendDebugLog(debugEvent);
@@ -936,7 +959,16 @@ async function bootstrapPywlet(): Promise<void> {
     }
   });
 
-  btnToggleDebug.addEventListener('click', () => aiDebugPanelEl.classList.toggle('hidden'));
+  btnToggleAiSetup.addEventListener('click', () => {
+    const isNowHidden = aiSetupDrawerEl.classList.toggle('hidden');
+    btnToggleAiSetup.textContent = isNowHidden ? '⚙️ AI Setup' : '✕ Hide Setup';
+    btnToggleAiSetup.classList.toggle('active-toggle', !isNowHidden);
+  });
+
+  btnToggleDebug.addEventListener('click', () => {
+    aiDebugPanelEl.classList.toggle('hidden');
+    btnToggleDebug.classList.toggle('active-toggle', !aiDebugPanelEl.classList.contains('hidden'));
+  });
   btnAiSetupHelp.addEventListener('click', () => chromeFlagsHelpDrawerEl.classList.toggle('hidden'));
   btnCloseFlagsHelp.addEventListener('click', () => chromeFlagsHelpDrawerEl.classList.add('hidden'));
   btnWebgpuHelp.addEventListener('click', () => chromeFlagsHelpDrawerEl.classList.toggle('hidden'));

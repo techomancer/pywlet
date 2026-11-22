@@ -1757,3 +1757,66 @@ body,
   align-items: center;
   gap: 6px;
 }
+
+
+/* ============================================================================
+   UNIFIED AI SETUP / DEBUG DRAWER & INTEGRATED TUTOR PROMPT DOCK
+   ============================================================================ */
+
+.tutor-header-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ai-setup-drawer {
+  background: rgba(10, 14, 20, 0.72);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 8px;
+  margin-bottom: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.ai-setup-top-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+}
+
+.ai-setup-top-row .select-control {
+  flex: 1;
+  min-width: 140px;
+}
+
+.ai-setup-drawer .llm-status-bar,
+.ai-setup-drawer .ai-debug-panel,
+.ai-setup-drawer .webgpu-flags-guide {
+  margin-bottom: 0;
+}
+
+.tutor-prompt-dock {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.tutor-quick-actions {
+  display: flex;
+  align-items: center;
+}
+
+.tutor-explain-btn {
+  width: 100%;
+  text-align: center;
+  padding: 5px 10px;
+}
+
+.icon-btn.active-toggle {
+  background: rgba(56, 189, 248, 0.18);
+  color: var(--accent-blue);
+  border-color: rgba(56, 189, 248, 0.5);
+}

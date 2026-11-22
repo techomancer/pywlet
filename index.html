@@ -153,11 +153,6 @@
               </div>
               <span id="syntax-badge" class="badge badge-ok">✓ No Syntax Issues</span>
             </div>
-            <div class="editor-actions" id="code-editor-actions">
-              <button id="btn-explain-selection" class="btn btn-Ask" title="Ask Pywlet Tutor to explain the selected code or word under cursor">
-                💡 Explain Under Cursor / Selection
-              </button>
-            </div>
           </div>
 
           <!-- Read-Only Example Workspace Banner -->
@@ -243,101 +238,111 @@
             <div class="section-header tutor-header">
               <div>
                 <span>🦉 PYWLET TUTOR</span>
-                <span class="tutor-subtitle">Explains & hints — never spoils the code!</span>
+                <span class="tutor-subtitle">Explains &amp; hints — never spoils the code!</span>
               </div>
-              <div class="llm-backend-picker">
+              <div class="tutor-header-controls">
+                <span id="tutor-mini-status" class="badge badge-ok" title="Active AI tutor status">Instant Coach</span>
+                <button id="btn-toggle-ai-setup" class="icon-btn" title="Open/Hide AI Backend Setup, Chrome Flags &amp; Debug Inspector">
+                  ⚙️ AI Setup
+                </button>
+              </div>
+            </div>
+
+            <!-- Unified AI Setup, Chrome Flags & Debug Drawer (hidden by default for normal operation) -->
+            <div id="ai-setup-drawer" class="ai-setup-drawer hidden">
+              <div class="ai-setup-top-row">
                 <select id="llm-backend-select" class="select-control select-small" title="Choose Local AI Backend">
                   <option value="transformers-js">Transformers.js (Qwen Local)</option>
                   <option value="chrome-prompt">Chrome Prompt API (Gemma 4 / Nano)</option>
                   <option value="ollama-local">Local Server (Ollama / llama.cpp)</option>
                 </select>
-                <button id="btn-ai-setup-help" class="btn btn-small" title="How to enable Chrome Flags for WebGPU & Built-in AI (Gemma 4)">
-                  ❓ Flags Help
-                </button>
-                <button id="btn-load-model" class="btn btn-small" title="Initialize or warm up local AI model">
+                <button id="btn-load-model" class="btn btn-small btn-Ask" title="Initialize or warm up local AI model">
                   ⚡ Load AI
                 </button>
+                <button id="btn-ai-setup-help" class="icon-btn" title="How to enable Chrome Flags for WebGPU &amp; Built-in AI (Gemma 4)">
+                  ❓ Flags
+                </button>
+                <button id="btn-toggle-debug" class="icon-btn" title="Show/Hide Prompt &amp; Token Stream Debug Inspector">
+                  🔍 Debug
+                </button>
               </div>
-            </div>
 
-            <!-- Collapsible Chrome Flags Setup Help Drawer (toggled via ❓ Flags Help next to AI selector) -->
-            <div id="chrome-flags-help-drawer" class="webgpu-flags-guide hidden">
-              <div class="flags-drawer-header">
-                <strong>⚙️ Required Chrome Flags (WebGPU + Built-in Gemma 4 AI)</strong>
-                <button id="btn-close-flags-help" class="icon-btn" title="Close help">✕</button>
+              <div id="llm-status-bar" class="llm-status-bar">
+                <span id="llm-status-text">Local AI idle — Instant coach active. Click "⚡ Load AI" or ask a question!</span>
               </div>
-              <p class="flags-drawer-intro">
-                Copy &amp; paste each URL into Chrome's address bar, set to <strong>Enabled</strong>, then click <strong>Relaunch</strong>:
-              </p>
-              <div class="flags-group">
-                <div class="flags-group-title">1. Hardware WebGPU Acceleration (Linux / AMD / Intel / NVIDIA)</div>
-                <ul>
-                  <li>
-                    <code>chrome://flags/#ignore-gpu-blocklist</code> → <strong>Enabled</strong>
-                    <span class="flag-desc">(Override software rendering list — prevents fallback to <code>google / swiftshader</code>)</span>
-                  </li>
-                  <li>
-                    <code>chrome://flags/#enable-vulkan</code> → <strong>Enabled</strong>
-                    <span class="flag-desc">(Vulkan — use Vulkan as the graphics backend)</span>
-                  </li>
-                  <li>
-                    <code>chrome://flags/#force-enable-webgpu-interop</code> → <strong>Enabled</strong>
-                    <span class="flag-desc">(Force enable WebGPU interop on Vulkan via GL compositing)</span>
-                  </li>
-                  <li>
-                    <code>chrome://flags/#enable-unsafe-webgpu</code> → <strong>Enabled</strong>
-                    <span class="flag-desc">(Unsafe WebGPU Support — enables WebGPU on Linux configurations)</span>
-                  </li>
-                </ul>
-              </div>
-              <div class="flags-group">
-                <div class="flags-group-title">2. Chrome Built-in AI (Prompt API &amp; Gemma 4)</div>
-                <ul>
-                  <li>
-                    <code>chrome://flags/#prompt-api</code> → <strong>Enabled</strong>
-                    <span class="flag-desc">(Enables the built-in <code>LanguageModel</code> Prompt API)</span>
-                  </li>
-                  <li>
-                    <code>chrome://flags/#gemma4-for-built-in-ai</code> → <strong>Enabled</strong>
-                    <span class="flag-desc">(Enables all built-in AI APIs to use the on-device Gemma 4 model)</span>
-                  </li>
-                </ul>
-                <div class="flags-tip">
-                  💡 <em>Tip:</em> After relaunching, you can check model download progress in <code>chrome://on-device-internals</code> or <code>chrome://components</code>.
+
+              <!-- Collapsible Chrome Flags Setup Help Drawer -->
+              <div id="chrome-flags-help-drawer" class="webgpu-flags-guide hidden">
+                <div class="flags-drawer-header">
+                  <strong>⚙️ Required Chrome Flags (WebGPU + Built-in Gemma 4 AI)</strong>
+                  <button id="btn-close-flags-help" class="icon-btn" title="Close help">✕</button>
                 </div>
-              </div>
-            </div>
-
-            <div id="llm-status-bar" class="llm-status-bar">
-              <span id="llm-status-text">Local AI idle — Instant coach active. Click "⚡ Load AI" or ask a question!</span>
-              <button id="btn-toggle-debug" class="icon-btn" title="Show/Hide AI & GPU Debug Inspector">
-                🔍 AI Debug
-              </button>
-            </div>
-
-            <!-- Collapsible AI & WebGPU Debug Inspector Panel (collapsed by default to keep UI calm) -->
-            <div id="ai-debug-panel" class="ai-debug-panel hidden">
-              <div class="ai-debug-header">
-                <div class="ai-debug-badges">
-                  <span id="gpu-device-badge" class="badge badge-warn">GPU: Probing...</span>
-                  <span id="llm-perf-badge" class="badge badge-ok">0 tok/s</span>
+                <p class="flags-drawer-intro">
+                  Copy &amp; paste each URL into Chrome's address bar, set to <strong>Enabled</strong>, then click <strong>Relaunch</strong>:
+                </p>
+                <div class="flags-group">
+                  <div class="flags-group-title">1. Hardware WebGPU Acceleration (Linux / AMD / Intel / NVIDIA)</div>
+                  <ul>
+                    <li>
+                      <code>chrome://flags/#ignore-gpu-blocklist</code> → <strong>Enabled</strong>
+                      <span class="flag-desc">(Override software rendering list — prevents fallback to <code>google / swiftshader</code>)</span>
+                    </li>
+                    <li>
+                      <code>chrome://flags/#enable-vulkan</code> → <strong>Enabled</strong>
+                      <span class="flag-desc">(Vulkan — use Vulkan as the graphics backend)</span>
+                    </li>
+                    <li>
+                      <code>chrome://flags/#force-enable-webgpu-interop</code> → <strong>Enabled</strong>
+                      <span class="flag-desc">(Force enable WebGPU interop on Vulkan via GL compositing)</span>
+                    </li>
+                    <li>
+                      <code>chrome://flags/#enable-unsafe-webgpu</code> → <strong>Enabled</strong>
+                      <span class="flag-desc">(Unsafe WebGPU Support — enables WebGPU on Linux configurations)</span>
+                    </li>
+                  </ul>
                 </div>
-                <div class="ai-debug-controls">
-                  <button id="btn-webgpu-help" class="icon-btn" title="Show Chrome flags for WebGPU & Built-in AI">
-                    ⚙️ Chrome Flags
-                  </button>
-                  <button id="btn-clear-debug" class="icon-btn">Clear</button>
+                <div class="flags-group">
+                  <div class="flags-group-title">2. Chrome Built-in AI (Prompt API &amp; Gemma 4)</div>
+                  <ul>
+                    <li>
+                      <code>chrome://flags/#prompt-api</code> → <strong>Enabled</strong>
+                      <span class="flag-desc">(Enables the built-in <code>LanguageModel</code> Prompt API)</span>
+                    </li>
+                    <li>
+                      <code>chrome://flags/#gemma4-for-built-in-ai</code> → <strong>Enabled</strong>
+                      <span class="flag-desc">(Enables all built-in AI APIs to use the on-device Gemma 4 model)</span>
+                    </li>
+                  </ul>
+                  <div class="flags-tip">
+                    💡 <em>Tip:</em> After relaunching, you can check model download progress in <code>chrome://on-device-internals</code> or <code>chrome://components</code>.
+                  </div>
                 </div>
               </div>
 
-              <div class="ai-debug-grid">
-                <div class="ai-debug-box">
-                  <div class="ai-debug-label">📤 Last Outgoing Prompt &amp; Event Log</div>
-                  <pre id="ai-debug-log" class="ai-debug-pre">Waiting for AI activity...</pre>
+              <!-- Collapsible AI & WebGPU Debug Inspector Panel -->
+              <div id="ai-debug-panel" class="ai-debug-panel hidden">
+                <div class="ai-debug-header">
+                  <div class="ai-debug-badges">
+                    <span id="gpu-device-badge" class="badge badge-warn">GPU: Probing...</span>
+                    <span id="llm-perf-badge" class="badge badge-ok">0 tok/s</span>
+                  </div>
+                  <div class="ai-debug-controls">
+                    <button id="btn-webgpu-help" class="icon-btn" title="Show Chrome flags for WebGPU &amp; Built-in AI">
+                      ⚙️ Flags
+                    </button>
+                    <button id="btn-clear-debug" class="icon-btn">Clear</button>
+                  </div>
                 </div>
-                <div class="ai-debug-box">
-                  <div class="ai-debug-label">📥 Live Raw Token Stream</div>
-                  <pre id="ai-debug-stream" class="ai-debug-pre">(No tokens generated yet)</pre>
+
+                <div class="ai-debug-grid">
+                  <div class="ai-debug-box">
+                    <div class="ai-debug-label">📤 Last Outgoing Prompt &amp; Event Log</div>
+                    <pre id="ai-debug-log" class="ai-debug-pre">Waiting for AI activity...</pre>
+                  </div>
+                  <div class="ai-debug-box">
+                    <div class="ai-debug-label">📥 Live Raw Token Stream</div>
+                    <pre id="ai-debug-stream" class="ai-debug-pre">(No tokens generated yet)</pre>
+                  </div>
                 </div>
               </div>
             </div>
@@ -345,19 +350,26 @@
             <div id="tutor-messages" class="tutor-messages">
               <div class="tutor-msg tutor-msg-assistant">
                 <strong>Hi! I'm Pywlet 🦉</strong><br />
-                Highlight any Python word in the editor and click <em>"💡 Explain Under Cursor"</em>, or ask me a question below. I won't write the code for you, but I'll help you figure it out!
+                Highlight any Python word in the editor and click <em>"💡 Explain Under Cursor / Selection"</em> below, or ask me a question. I won't write the code for you, but I'll help you figure it out!
               </div>
             </div>
 
-            <form id="tutor-form" class="tutor-input-row">
-              <input
-                id="tutor-input"
-                type="text"
-                placeholder="Ask about your code, Python syntax, or how to build an idea..."
-                autocomplete="off"
-              />
-              <button type="submit" id="btn-send-tutor" class="btn btn-Ask">Ask</button>
-            </form>
+            <div class="tutor-prompt-dock">
+              <div class="tutor-quick-actions" id="code-editor-actions">
+                <button id="btn-explain-selection" class="btn btn-small btn-Ask tutor-explain-btn" title="Ask Pywlet Tutor to explain the selected code or word under cursor (Ctrl+E)">
+                  💡 Explain Under Cursor / Selection
+                </button>
+              </div>
+              <form id="tutor-form" class="tutor-input-row">
+                <input
+                  id="tutor-input"
+                  type="text"
+                  placeholder="Ask about your code, Python syntax, or how to build an idea..."
+                  autocomplete="off"
+                />
+                <button type="submit" id="btn-send-tutor" class="btn btn-Ask">Ask</button>
+              </form>
+            </div>
           </div>
         </section>
       </main>
