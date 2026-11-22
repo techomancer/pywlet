@@ -112,14 +112,10 @@ async function ensurePyodide(pyodideBaseUrl: string): Promise<PyodideInstance> {
             // Non-spinning 60 FPS sleep that wakes immediately on Stop!
             Atomics.wait(waitBuf, 0, 0, clamped);
             checkStopSignal();
-          } else {
-            // Brief fallback pause when SharedArrayBuffer is unavailable
-            const end = performance.now() + Math.min(clamped, 25);
-            while (performance.now() < end) {
-              // Cooperative fallback
-            }
-            checkStopSignal();
           }
+          // When SharedArrayBuffer is unavailable, `_pywlet_run_async_fallback`
+          // yields cooperatively via `await asyncio.sleep(0.016)` so worker
+          // postMessage events (keys, mouse, stop) are processed every frame!
         },
       });
 
@@ -246,6 +242,11 @@ self.onmessage = async (event: MessageEvent) => {
     return;
   }
 
+  if (msg.type === 'FALLBACK_CLEAR_KEYS') {
+    fallbackKeys.clear();
+    return;
+  }
+
   if (msg.type === 'STOP') {
     fallbackStop = true;
     return;
@@ -293,13 +294,19 @@ self.onmessage = async (event: MessageEvent) => {
       inst.globals.set('_pywlet_run_code', code);
       inst.globals.set('_pywlet_run_file', filename || 'main.py');
 
-      const execScript = `
-import traceback as _tb
+      if (waitBuf && inputBuf) {
+        // Fast path (SharedArrayBuffer available): run untouched synchronous CPython
+        const execScript = `
 _ns = {'__name__': '__main__', '__file__': _pywlet_run_file}
 _compiled = compile(_pywlet_run_code, _pywlet_run_file, 'exec')
 exec(_compiled, _ns, _ns)
 `;
-      inst.runPython(execScript);
+        inst.runPython(execScript);
+      } else {
+        // Non-SharedArrayBuffer path (e.g. plain HTTP LAN IP or pre-COI load):
+        // yield cooperatively on every `while` frame so postMessage keys/mouse/stop work!
+        await inst.runPythonAsync('await _pywlet_run_async_fallback(_pywlet_run_code, _pywlet_run_file)');
+      }
       // Flush any trailing drawing commands from scripts without a game loop
       inst.runPython('import pygame; pygame.display.flip()');
       self.postMessage({ type: 'RUN_DONE' });

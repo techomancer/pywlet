@@ -939,4 +939,105 @@ def _pywlet_reset_runtime_state():
     _pywlet_start_ms = time.monotonic() * 1000.0
     _pywlet_last_flip = 0.0
     _pywlet_clock_used = False
+
+
+# =============================================================================
+# 3. COOPERATIVE ASYNC FALLBACK (WHEN SharedArrayBuffer IS UNAVAILABLE)
+# =============================================================================
+import asyncio
+
+async def _pywlet_async_frame_yield():
+    _pywlet_host.check_stop()
+    await asyncio.sleep(0.016)
+    _pywlet_host.check_stop()
+
+
+class _AsyncYieldTransformer(ast.NodeTransformer):
+    def __init__(self):
+        self.async_funcs = set()
+
+    def _make_yield_stmt(self, lineno):
+        stmt = ast.Expr(
+            value=ast.Await(
+                value=ast.Call(
+                    func=ast.Name(id='_pywlet_async_frame_yield', ctx=ast.Load()),
+                    args=[],
+                    keywords=[],
+                )
+            )
+        )
+        stmt.lineno = lineno
+        stmt.col_offset = 0
+        return stmt
+
+    def _contains_while(self, nodes):
+        for n in nodes:
+            for sub in ast.walk(n):
+                if isinstance(sub, ast.While):
+                    return True
+        return False
+
+    def visit_FunctionDef(self, node):
+        self.generic_visit(node)
+        if self._contains_while(node.body):
+            self.async_funcs.add(node.name)
+            async_fn = ast.AsyncFunctionDef(
+                name=node.name,
+                args=node.args,
+                body=node.body,
+                decorator_list=node.decorator_list,
+                returns=node.returns,
+                type_comment=node.type_comment,
+                type_params=getattr(node, 'type_params', []),
+            )
+            return ast.copy_location(async_fn, node)
+        return node
+
+    def visit_While(self, node):
+        self.generic_visit(node)
+        node.body.append(self._make_yield_stmt(node.lineno))
+        return node
+
+    def visit_Call(self, node):
+        self.generic_visit(node)
+        if isinstance(node.func, ast.Name) and node.func.id in self.async_funcs:
+            return ast.copy_location(ast.Await(value=node), node)
+        return node
+
+
+async def _pywlet_run_async_fallback(code, filename='main.py'):
+    tree = ast.parse(code, filename=filename)
+    transformer = _AsyncYieldTransformer()
+    tree = transformer.visit(tree)
+
+    wrapper = ast.Module(
+        body=[
+            ast.AsyncFunctionDef(
+                name='__pywlet_main__',
+                args=ast.arguments(
+                    posonlyargs=[],
+                    args=[],
+                    vararg=None,
+                    kwonlyargs=[],
+                    kw_defaults=[],
+                    kwarg=None,
+                    defaults=[],
+                ),
+                body=tree.body or [ast.Pass()],
+                decorator_list=[],
+                returns=None,
+                type_params=[],
+            )
+        ],
+        type_ignores=[],
+    )
+    ast.fix_missing_locations(wrapper)
+    ns = {
+        '__name__': '__main__',
+        '__file__': filename,
+        '_pywlet_async_frame_yield': _pywlet_async_frame_yield,
+    }
+    compiled = compile(wrapper, filename, 'exec')
+    exec(compiled, ns, ns)
+    await ns['__pywlet_main__']()
 `;

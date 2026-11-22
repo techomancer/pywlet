@@ -1820,3 +1820,9 @@ body,
   color: var(--accent-blue);
   border-color: rgba(56, 189, 248, 0.5);
 }
+
+
+#pygame-canvas:focus {
+  outline: 2px solid var(--accent-blue);
+  outline-offset: -2px;
+}

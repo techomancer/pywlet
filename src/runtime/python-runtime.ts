@@ -27,12 +27,51 @@ const KEY_CODE_TO_PYGAME: Record<string, number> = {
   Tab: 11,
 };
 
+const KEY_NAME_TO_PYGAME: Record<string, number> = {
+  ArrowLeft: 1,
+  Left: 1,
+  ArrowRight: 2,
+  Right: 2,
+  ArrowUp: 3,
+  Up: 3,
+  ArrowDown: 4,
+  Down: 4,
+  ' ': 5,
+  Spacebar: 5,
+  Enter: 6,
+  Escape: 7,
+  Esc: 7,
+  Shift: 8,
+  Backspace: 10,
+  Tab: 11,
+};
+
 for (let i = 0; i < 26; i++) {
   const ch = String.fromCharCode(65 + i);
   KEY_CODE_TO_PYGAME[`Key${ch}`] = 20 + i;
+  KEY_NAME_TO_PYGAME[ch.toLowerCase()] = 20 + i;
+  KEY_NAME_TO_PYGAME[ch] = 20 + i;
 }
 for (let i = 0; i < 10; i++) {
   KEY_CODE_TO_PYGAME[`Digit${i}`] = 50 + i;
+  KEY_NAME_TO_PYGAME[String(i)] = 50 + i;
+}
+
+function resolvePygameKeyCode(e: KeyboardEvent): number | undefined {
+  // Prefer e.key for Arrow keys so Windows Numpad arrows (NumLock OFF) also work!
+  if (e.key && e.key in KEY_NAME_TO_PYGAME) {
+    return KEY_NAME_TO_PYGAME[e.key];
+  }
+  return KEY_CODE_TO_PYGAME[e.code];
+}
+
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  const tag = target.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable) {
+    return true;
+  }
+  return Boolean(target.closest('.monaco-editor'));
 }
 
 /**
@@ -212,33 +251,56 @@ export class PythonPygameRuntime {
   }
 
   private bindInputEvents(): void {
-    window.addEventListener('keydown', (e) => {
-      if (!this.running) return;
-      const pgCode = KEY_CODE_TO_PYGAME[e.code];
-      if (pgCode !== undefined) {
-        if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) {
-          e.preventDefault();
+    // Use capture phase so game controls work reliably on Windows & Linux Chrome
+    // without buttons/scrollbars swallowing Arrow keys or Space.
+    window.addEventListener(
+      'keydown',
+      (e) => {
+        if (!this.running) return;
+        // Let the user keep typing in Monaco or Tutor chat if those are explicitly focused
+        if (isEditableTarget(e.target) && document.activeElement !== this.canvas) {
+          return;
         }
-        if (this.inputBuf) {
-          Atomics.store(this.inputBuf, 4 + pgCode, 1);
-        } else {
-          this.worker?.postMessage({ type: 'FALLBACK_KEY', keyCode: pgCode, down: true });
+        const pgCode = resolvePygameKeyCode(e);
+        if (pgCode !== undefined) {
+          if (pgCode >= 1 && pgCode <= 5) {
+            e.preventDefault();
+          }
+          if (this.inputBuf) {
+            Atomics.store(this.inputBuf, 4 + pgCode, 1);
+          } else {
+            this.worker?.postMessage({ type: 'FALLBACK_KEY', keyCode: pgCode, down: true });
+          }
+          this.worker?.postMessage({ type: 'EVENT', event: { type: 768, key: pgCode } });
         }
-        this.worker?.postMessage({ type: 'EVENT', event: { type: 768, key: pgCode } });
-      }
-    });
+      },
+      true
+    );
 
-    window.addEventListener('keyup', (e) => {
-      const pgCode = KEY_CODE_TO_PYGAME[e.code];
-      if (pgCode !== undefined) {
-        if (this.inputBuf) {
-          Atomics.store(this.inputBuf, 4 + pgCode, 0);
-        } else {
-          this.worker?.postMessage({ type: 'FALLBACK_KEY', keyCode: pgCode, down: false });
+    window.addEventListener(
+      'keyup',
+      (e) => {
+        const pgCode = resolvePygameKeyCode(e);
+        if (pgCode !== undefined) {
+          if (this.inputBuf) {
+            Atomics.store(this.inputBuf, 4 + pgCode, 0);
+          } else {
+            this.worker?.postMessage({ type: 'FALLBACK_KEY', keyCode: pgCode, down: false });
+          }
+          if (this.running) {
+            this.worker?.postMessage({ type: 'EVENT', event: { type: 769, key: pgCode } });
+          }
         }
-        if (this.running) {
-          this.worker?.postMessage({ type: 'EVENT', event: { type: 769, key: pgCode } });
-        }
+      },
+      true
+    );
+
+    // Clear all held keys if the browser window loses focus so keys never get stuck
+    window.addEventListener('blur', () => {
+      if (this.inputBuf) {
+        for (let i = 4; i < 128; i++) Atomics.store(this.inputBuf, i, 0);
+      } else {
+        this.worker?.postMessage({ type: 'FALLBACK_CLEAR_KEYS' });
       }
     });
 
@@ -259,6 +321,7 @@ export class PythonPygameRuntime {
 
     this.canvas.addEventListener('mousemove', updateMouse);
     this.canvas.addEventListener('mousedown', (e) => {
+      this.canvas.focus();
       updateMouse(e);
       if (this.running) {
         const rect = this.canvas.getBoundingClientRect();
@@ -418,6 +481,10 @@ export class PythonPygameRuntime {
 
     this.running = true;
     this.callbacks.onStatusChange(this.pyodideReady ? 'running' : 'loading');
+    // Move keyboard focus off Monaco / Run button onto the Game Stage canvas immediately
+    if (document.activeElement instanceof HTMLElement && document.activeElement !== this.canvas) {
+      document.activeElement.blur();
+    }
     this.canvas.focus();
 
     worker.postMessage({
