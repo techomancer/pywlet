@@ -30,17 +30,27 @@ export function classifyWorkspaceFile(filename: string, content?: string | null)
   const lower = filename.toLowerCase();
   if (lower.endsWith('.png')) return 'png';
   if (lower.endsWith('.wav')) return 'wav';
+  if (lower === 'main.py' || lower.endsWith('/main.py')) return 'python';
   if (
     lower === 'sprites_data.py' ||
     lower.endsWith('/sprites_data.py') ||
+    lower.endsWith('_sprites.py') ||
     (lower.endsWith('.py') &&
       typeof content === 'string' &&
-      content.includes('SPRITE_SHEETS') &&
-      content.includes('PALETTE'))
+      /^\s*PALETTE\s*=\s*\[/m.test(content) &&
+      /^\s*(?:SPRITE_SHEETS\s*=\s*\{|SPRITES\s*=\s*\[)/m.test(content))
   ) {
     return 'sprite-sheet';
   }
   return 'python';
+}
+
+export function getDefaultActiveFile(files: Record<string, string>): string {
+  if ('main.py' in files) return 'main.py';
+  const firstPython = Object.keys(files).find(
+    (name) => classifyWorkspaceFile(name, files[name]) === 'python'
+  );
+  return firstPython || Object.keys(files)[0] || 'main.py';
 }
 
 export function getDefaultSpritesDataPy(): string {
@@ -569,7 +579,7 @@ export class WorkspaceStore {
       readOnly: true,
       createdAt: now,
       updatedAt: now,
-      activeFile: 'main.py' in files ? 'main.py' : Object.keys(files)[0] || 'main.py',
+      activeFile: getDefaultActiveFile(files),
       files,
     };
     return this.examplePreview;
@@ -628,7 +638,7 @@ export class WorkspaceStore {
       sourceTemplateId: tpl.id,
       createdAt: now,
       updatedAt: now,
-      activeFile: 'main.py' in files ? 'main.py' : Object.keys(files)[0] || 'main.py',
+      activeFile: getDefaultActiveFile(files),
       files,
     };
 
@@ -758,9 +768,8 @@ while running:
 
   public getActiveFileName(): string {
     const ws = this.getActiveWorkspace();
-    if (ws.activeFile in ws.files) return ws.activeFile;
-    const names = this.getFileNames();
-    ws.activeFile = names[0] || 'main.py';
+    if (ws.activeFile && ws.activeFile in ws.files) return ws.activeFile;
+    ws.activeFile = getDefaultActiveFile(ws.files);
     return ws.activeFile;
   }
 

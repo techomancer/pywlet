@@ -28,6 +28,9 @@
           <button id="btn-save-project" class="btn btn-secondary" title="Save workspace to browser storage (Ctrl+S)">
             💾 Save
           </button>
+          <button id="btn-start-tour" class="btn btn-secondary" title="Quick guided tour of the Pywlet workspace">
+            🧭 Guide
+          </button>
           <button id="btn-install-pwa" class="btn btn-secondary hidden" title="Install Pywlet as an offline app">
             📲 Install App
           </button>
@@ -312,8 +315,8 @@
               </button>
             </div>
 
-            <!-- Collapsible AI & WebGPU Debug Inspector Panel -->
-            <div id="ai-debug-panel" class="ai-debug-panel">
+            <!-- Collapsible AI & WebGPU Debug Inspector Panel (collapsed by default to keep UI calm) -->
+            <div id="ai-debug-panel" class="ai-debug-panel hidden">
               <div class="ai-debug-header">
                 <div class="ai-debug-badges">
                   <span id="gpu-device-badge" class="badge badge-warn">GPU: Probing...</span>

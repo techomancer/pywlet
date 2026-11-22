@@ -16,6 +16,7 @@ import { createStarterSoundWav } from './audio-editor/wav-codec';
 import { SpriteEditorController } from './sprite-editor/sprite-editor';
 import { WavEditorController } from './audio-editor/wav-editor';
 import { initPwa } from './pwa/register-pwa';
+import { UiTourOverlay } from './ui/tour-overlay';
 
 function formatSimpleMarkdown(text: string): string {
   return text
@@ -97,6 +98,7 @@ async function bootstrapPywlet(): Promise<void> {
   // Buttons & Controls
   const btnOpenFolder = document.getElementById('btn-open-folder')!;
   const btnSaveProject = document.getElementById('btn-save-project') as HTMLButtonElement;
+  const btnStartTour = document.getElementById('btn-start-tour')!;
   const btnNewPy = document.getElementById('btn-new-py')!;
   const btnNewPng = document.getElementById('btn-new-png')!;
   const btnNewWav = document.getElementById('btn-new-wav')!;
@@ -140,10 +142,6 @@ async function bootstrapPywlet(): Promise<void> {
         ? `⚡ WebGPU: ${event.data.adapterInfo || 'Hardware Active'}`
         : `⚙️ ${event.data.adapterInfo || 'SIMD WASM'}`;
       gpuDeviceBadgeEl.className = isGpu ? 'badge badge-ok' : 'badge badge-warn';
-
-      if (event.stage === 'gpu-probe' && event.data.webgpuAvailable === false) {
-        chromeFlagsHelpDrawerEl.classList.remove('hidden');
-      }
     }
 
     if (event.data?.tokensPerSec) {
@@ -1087,6 +1085,16 @@ async function bootstrapPywlet(): Promise<void> {
   updateWorkspaceHeaders();
   openActiveFileInEditor(true);
   initPwa(document.getElementById('btn-install-pwa'));
+
+  // Optional kid-friendly UI walkthrough overlay (auto-shows once on first visit)
+  const uiTour = new UiTourOverlay(() => {
+    // Ensure both sidebars are visible during the walkthrough
+    workspaceEl.classList.remove('hide-left', 'hide-right');
+    updateLayoutToggleButtons();
+    setWorkspaceBrowserOpen(false);
+  });
+  btnStartTour.addEventListener('click', () => uiTour.start());
+  uiTour.startIfFirstVisit();
 }
 
 void bootstrapPywlet();
