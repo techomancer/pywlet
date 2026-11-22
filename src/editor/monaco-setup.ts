@@ -13,6 +13,8 @@ export class CodeEditorController {
   private model: monaco.editor.ITextModel;
   private onCodeChangeCallback?: (code: string) => void;
   private onAskTutorCallback?: (ctx: EditorCursorContext) => void;
+  private suppressChangeEvent = false;
+  private readOnly = false;
 
   constructor(
     container: HTMLElement,
@@ -44,6 +46,7 @@ export class CodeEditorController {
     });
 
     this.model.onDidChangeContent(() => {
+      if (this.suppressChangeEvent) return;
       this.onCodeChangeCallback?.(this.model.getValue());
     });
 
@@ -65,7 +68,32 @@ export class CodeEditorController {
   }
 
   setValue(code: string): void {
-    this.model.setValue(code);
+    this.suppressChangeEvent = true;
+    try {
+      this.model.setValue(code);
+    } finally {
+      this.suppressChangeEvent = false;
+    }
+  }
+
+  setReadOnly(readOnly: boolean, message?: string): void {
+    this.readOnly = readOnly;
+    this.editor.updateOptions({
+      readOnly,
+      readOnlyMessage: {
+        value:
+          message ||
+          '🔒 sprites_data.py is write-protected so the Visual Sprite Editor can always parse it. Click "🔓 Unlock Manual Edit" above to edit by hand.',
+      },
+    });
+  }
+
+  isReadOnly(): boolean {
+    return this.readOnly;
+  }
+
+  layout(): void {
+    this.editor.layout();
   }
 
   getCursorContext(): EditorCursorContext {

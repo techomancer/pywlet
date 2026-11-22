@@ -481,9 +481,11 @@ body,
   border-color: rgba(56, 189, 248, 0.45);
 }
 
+.hidden,
 .monaco-container.hidden,
-.sprite-studio-container.hidden {
-  display: none;
+.sprite-studio-container.hidden,
+.wav-editor-container.hidden {
+  display: none !important;
 }
 
 /* Sprite & Tilemap Studio */
@@ -1194,4 +1196,450 @@ body,
   height: 1px;
   overflow: hidden;
   clip: rect(0, 0, 0, 0);
+}
+
+
+/* ============================================================================
+   WORKSPACE BROWSER, UNIFIED FILE LIST & PROTECTED CODE BANNER
+   ============================================================================ */
+
+.workspace-pill-btn {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-header-section {
+  background: rgba(15, 20, 28, 0.45);
+}
+
+.workspace-switcher-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.workspace-current-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.workspace-kicker {
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+
+.workspace-title-text {
+  font-size: 13px;
+  color: var(--text-main);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-browser-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.workspace-browser-actions .btn {
+  flex: 1;
+  text-align: center;
+}
+
+.workspace-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ws-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 7px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-dark);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.ws-card:hover {
+  border-color: rgba(56, 189, 248, 0.55);
+  background: var(--bg-elevated);
+}
+
+.ws-card.active {
+  border-color: var(--accent-blue);
+  background: rgba(56, 189, 248, 0.12);
+}
+
+.ws-card-main {
+  flex: 1;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.ws-card-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-main);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ws-card-meta {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  margin-top: 2px;
+  line-height: 1.25;
+}
+
+.ws-card-actions {
+  display: flex;
+  gap: 3px;
+  flex-shrink: 0;
+}
+
+.new-file-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.file-item-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+}
+
+.file-item-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-thumb {
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+  image-rendering: pixelated;
+  background: #0b1018;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.file-item-actions {
+  display: flex;
+  gap: 3px;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.file-item:hover .file-item-actions,
+.file-item.active .file-item-actions {
+  opacity: 1;
+}
+
+.file-mini-btn {
+  padding: 1px 4px;
+  font-size: 10px;
+}
+
+.active-file-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--text-main);
+  padding: 3px 8px;
+  background: var(--bg-dark);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+}
+
+.sprite-subtabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.protected-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 12px;
+  background: rgba(245, 158, 11, 0.14);
+  border-bottom: 1px solid rgba(245, 158, 11, 0.4);
+  color: #fde68a;
+  font-size: 12px;
+}
+
+.protected-banner.unlocked {
+  background: rgba(239, 68, 68, 0.14);
+  border-bottom-color: rgba(239, 68, 68, 0.45);
+  color: #fecaca;
+}
+
+.protected-banner code {
+  font-family: var(--font-mono);
+  background: rgba(0, 0, 0, 0.25);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
+/* Single PNG Mode tweaks inside Sprite Studio */
+.sprite-studio .png-only-ctrl {
+  display: none;
+}
+
+.sprite-studio.single-png-mode .sheet-only-ctrl {
+  display: none !important;
+}
+
+.sprite-studio.single-png-mode .png-only-ctrl {
+  display: inline-flex;
+}
+
+.sprite-studio.single-png-mode .sprite-studio-body {
+  grid-template-columns: 240px 1fr;
+}
+
+/* ============================================================================
+   WAV AUDIO & SYNTH EDITOR
+   ============================================================================ */
+
+.wav-editor-container {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--bg-dark);
+}
+
+.wav-studio {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+  min-height: 100%;
+}
+
+.wav-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.wav-toolbar-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.wav-wave-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.wav-canvas-wrap {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  background: #0b1018;
+}
+
+#wav-canvas {
+  display: block;
+  width: 100%;
+  height: 170px;
+  cursor: crosshair;
+}
+
+.wav-edit-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.wav-edit-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+}
+
+.wav-group-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted);
+}
+
+.wav-val-label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--accent-blue);
+  min-width: 36px;
+}
+
+.wav-deck-grid {
+  display: grid;
+  grid-template-columns: 1fr 270px;
+  gap: 10px;
+}
+
+.wav-gen-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.wav-gen-mode-wrap {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.wav-param-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.wav-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+.wav-field strong {
+  color: var(--text-main);
+  font-family: var(--font-mono);
+}
+
+.wav-field-action {
+  justify-content: flex-end;
+}
+
+.wav-presets-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+
+.wav-env-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+#wav-env-canvas {
+  width: 100%;
+  height: 72px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: #0b1018;
+}
+
+.wav-env-sliders {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.wav-env-row {
+  display: grid;
+  grid-template-columns: 52px 1fr 44px;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.wav-env-row span:last-child {
+  font-family: var(--font-mono);
+  color: var(--text-main);
+  text-align: right;
+}
+
+@media (max-width: 1180px) {
+  .wav-deck-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+
+/* ============================================================================
+   READ-ONLY EXAMPLE WORKSPACE BANNER & EDITOR LOCK STATES
+   ============================================================================ */
+
+.readonly-workspace-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 12px;
+  background: rgba(56, 189, 248, 0.14);
+  border-bottom: 1px solid rgba(56, 189, 248, 0.4);
+  color: #bae6fd;
+  font-size: 12px;
+}
+
+.sprite-studio.is-readonly #sp-pixel-canvas,
+.sprite-studio.is-readonly #sp-map-canvas {
+  cursor: not-allowed;
+}
+
+.sprite-studio.is-readonly .tool-grid,
+.sprite-studio.is-readonly .tool-actions-row,
+.sprite-studio.is-readonly .palette-header-controls {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.wav-studio.is-readonly .wav-deck-grid {
+  opacity: 0.55;
+  pointer-events: none;
 }

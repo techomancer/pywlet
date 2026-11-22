@@ -19,14 +19,24 @@ import {
 export interface SpriteEditorCallbacks {
   onSaveToPythonFile: (filename: string, pyCode: string) => void;
   onReadPythonFile: (filename: string) => string | null;
+  onSavePngFile?: (filename: string, dataUrl: string) => void;
 }
+
+export type SpriteEditorMode = 'sheet' | 'png';
 
 const NEIGHBOR_DIRECTIONS = ['NW', 'N', 'NE', 'W', 'E', 'SW', 'S', 'SE'] as const;
 
 export class SpriteEditorController {
   private container: HTMLElement;
   private callbacks: SpriteEditorCallbacks;
+  private mode: SpriteEditorMode = 'sheet';
+  private activePythonFilename = 'sprites_data.py';
+  private activePngFilename = 'assets/sprite.png';
+  private sheetData: SpriteProjectData;
+  private pngData: SpriteProjectData;
   private data: SpriteProjectData;
+  private autoSaveTimer: number | null = null;
+  private readOnly = false;
 
   private activeSpriteIdx = 0;
   private activeLayerIdx = 0;
@@ -52,21 +62,237 @@ export class SpriteEditorController {
   constructor(container: HTMLElement, callbacks: SpriteEditorCallbacks) {
     this.container = container;
     this.callbacks = callbacks;
-    this.data = createStarterSpriteProject(8);
+    this.sheetData = createStarterSpriteProject(8);
+    this.pngData = this.createEmptyPngProject(16, 'sprite');
+    this.data = this.sheetData;
 
     this.buildDOM();
     this.renderAll();
   }
 
-  public getProjectData(): SpriteProjectData {
-    return this.data;
+  private createEmptyPngProject(size: number, name: string): SpriteProjectData {
+    return {
+      palette: [
+        'transparent',
+        '#0f172a',
+        '#e2e8f0',
+        '#ef4444',
+        '#f97316',
+        '#facc15',
+        '#22c55e',
+        '#38bdf8',
+        '#2563eb',
+        '#a855f7',
+        '#ec4899',
+        '#78350f',
+      ],
+      activeSheetName: 'png',
+      activeMapName: 'map',
+      sheets: {
+        png: {
+          name: 'png',
+          spriteSize: size,
+          cols: 1,
+          rows: 1,
+          sprites: [createSpriteCell(0, size, name)],
+        },
+      },
+      maps: {
+        map: {
+          name: 'map',
+          sheetName: 'png',
+          cols: 4,
+          rows: 4,
+          tiles: createEmptyRectGrid(4, 4, -1),
+        },
+      },
+      showSeamlessNeighbors: false,
+      neighborSlots: [-1, -1, -1, -1, -1, -1, -1, -1],
+    };
   }
 
-  public loadFromPythonString(pyCode: string): void {
-    this.data = parsePythonToSpriteProject(pyCode, this.data);
+  public getMode(): SpriteEditorMode {
+    return this.mode;
+  }
+
+  public setReadOnly(readOnly: boolean): void {
+    this.readOnly = readOnly;
+    const studio = this.container.querySelector('.sprite-studio');
+    if (studio) {
+      studio.classList.toggle('is-readonly', readOnly);
+    }
+    const mutatingIds = [
+      '#sp-btn-new-sheet',
+      '#sp-size-select',
+      '#sp-sheet-dim-select',
+      '#sp-btn-save-py',
+      '#sp-btn-save-png',
+      '#sp-btn-undo',
+      '#sp-btn-paste',
+      '#sp-btn-flip-h',
+      '#sp-btn-clear',
+      '#sp-custom-color',
+      '#sp-btn-add-color',
+      '#sp-btn-merge-layers',
+      '#sp-sprite-name',
+      '#sp-btn-new-map',
+      '#sp-map-dim-select',
+      '#sp-btn-fill-map',
+      '#sp-btn-clear-map',
+      '#sp-input-import-png',
+    ];
+    for (const sel of mutatingIds) {
+      const el = this.container.querySelector(sel) as HTMLButtonElement | HTMLInputElement | HTMLSelectElement | null;
+      if (el) el.disabled = readOnly;
+    }
+  }
+
+  public getProjectData(): SpriteProjectData {
+    return this.sheetData;
+  }
+
+  public loadFromPythonString(pyCode: string, filename = 'sprites_data.py'): void {
+    this.mode = 'sheet';
+    this.activePythonFilename = filename;
+    this.sheetData = parsePythonToSpriteProject(pyCode, this.sheetData);
+    this.data = this.sheetData;
     this.activeSpriteIdx = 0;
     this.activeLayerIdx = 0;
+    this.undoStack = [];
+    this.applyModeUI();
     this.renderAll();
+  }
+
+  public loadPngFile(filename: string, dataUrl: string): void {
+    this.mode = 'png';
+    this.activePngFilename = filename;
+    const baseName = filename.split('/').pop() || filename;
+    this.pngData = this.createEmptyPngProject(16, baseName);
+    this.data = this.pngData;
+    this.activeSpriteIdx = 0;
+    this.activeLayerIdx = 0;
+    this.undoStack = [];
+    this.applyModeUI();
+
+    if (!dataUrl || !dataUrl.startsWith('data:image')) {
+      this.renderAll();
+      return;
+    }
+
+    const img = new Image();
+    img.onload = () => {
+      // Preserve pixel dimensions up to 64x64 (single-sprite pixel editor)
+      const rawSize = Math.max(img.naturalWidth || 16, img.naturalHeight || 16);
+      const size = Math.max(8, Math.min(64, rawSize));
+      const project = this.createEmptyPngProject(size, baseName);
+
+      const off = document.createElement('canvas');
+      off.width = size;
+      off.height = size;
+      const ctx = off.getContext('2d')!;
+      ctx.imageSmoothingEnabled = false;
+      const drawW = Math.min(size, img.naturalWidth || size);
+      const drawH = Math.min(size, img.naturalHeight || size);
+      const ox = Math.floor((size - drawW) / 2);
+      const oy = Math.floor((size - drawH) / 2);
+      ctx.drawImage(img, ox, oy, drawW, drawH);
+
+      const rgba = ctx.getImageData(0, 0, size, size).data;
+      const colorToIdx = new Map<string, number>();
+      const palette: string[] = ['transparent'];
+
+      const pixels = project.sheets.png.sprites[0].layers[0].pixels;
+      for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+          const i = (y * size + x) * 4;
+          const a = rgba[i + 3];
+          if (a < 40) {
+            pixels[y][x] = 0;
+            continue;
+          }
+          const hex =
+            '#' +
+            [rgba[i], rgba[i + 1], rgba[i + 2]]
+              .map((v) => v.toString(16).padStart(2, '0'))
+              .join('');
+          let idx = colorToIdx.get(hex);
+          if (idx === undefined) {
+            if (palette.length < 64) {
+              idx = palette.length;
+              palette.push(hex);
+              colorToIdx.set(hex, idx);
+            } else {
+              idx = this.findNearestPaletteIndexIn(palette, rgba[i], rgba[i + 1], rgba[i + 2]);
+            }
+          }
+          pixels[y][x] = idx;
+        }
+      }
+
+      // Ensure a handy starter set of colors is available if image was empty/tiny
+      for (const fallback of ['#0f172a', '#e2e8f0', '#ef4444', '#facc15', '#22c55e', '#38bdf8', '#a855f7']) {
+        if (!colorToIdx.has(fallback) && palette.length < 32) {
+          colorToIdx.set(fallback, palette.length);
+          palette.push(fallback);
+        }
+      }
+
+      project.palette = palette;
+      this.pngData = project;
+      if (this.mode === 'png' && this.activePngFilename === filename) {
+        this.data = this.pngData;
+        this.activeColorIdx = Math.min(1, palette.length - 1);
+        this.renderAll();
+      }
+    };
+    img.src = dataUrl;
+    this.renderAll();
+  }
+
+  private applyModeUI(): void {
+    const studio = this.container.querySelector('.sprite-studio');
+    if (studio) {
+      studio.classList.toggle('single-png-mode', this.mode === 'png');
+    }
+    const seamlessToggle = this.container.querySelector('#sp-seamless-toggle') as HTMLInputElement | null;
+    if (seamlessToggle) {
+      seamlessToggle.checked = this.mode === 'sheet' && this.data.showSeamlessNeighbors;
+    }
+  }
+
+  private scheduleAutoSave(): void {
+    if (this.readOnly) return;
+    if (this.autoSaveTimer !== null) {
+      window.clearTimeout(this.autoSaveTimer);
+    }
+    this.autoSaveTimer = window.setTimeout(() => {
+      this.autoSaveTimer = null;
+      this.saveCurrentToWorkspace(true);
+    }, 250);
+  }
+
+  private saveCurrentToWorkspace(silent = false): void {
+    if (this.mode === 'png') {
+      const dataUrl = this.renderActiveSpriteToPngDataUrl();
+      this.callbacks.onSavePngFile?.(this.activePngFilename, dataUrl);
+    } else if (!silent) {
+      const pyCode = serializeSpriteProjectToPython(this.sheetData);
+      this.callbacks.onSaveToPythonFile(this.activePythonFilename, pyCode);
+    } else {
+      const pyCode = serializeSpriteProjectToPython(this.sheetData);
+      this.callbacks.onSaveToPythonFile(this.activePythonFilename, pyCode);
+    }
+  }
+
+  private renderActiveSpriteToPngDataUrl(): string {
+    const sheet = this.getActiveSheet();
+    const size = sheet.spriteSize;
+    const offscreen = document.createElement('canvas');
+    offscreen.width = size;
+    offscreen.height = size;
+    const ctx = offscreen.getContext('2d')!;
+    this.drawSpriteAt(ctx, sheet, 0, 0, 0, size, size, 1.0);
+    return offscreen.toDataURL('image/png');
   }
 
   private getActiveSheet(): NamedSpriteSheet {
@@ -112,28 +338,35 @@ export class SpriteEditorController {
         <!-- Studio Top Action Bar -->
         <div class="sprite-toolbar">
           <div class="sprite-toolbar-group">
-            <label>Sheet:</label>
-            <select id="sp-sheet-select" class="select-control select-small" title="Select Named Sprite Sheet"></select>
-            <button id="sp-btn-new-sheet" class="icon-btn" title="Create a new named Sprite Sheet">+ Sheet</button>
+            <span class="sheet-only-ctrl">
+              <label>Sheet:</label>
+              <select id="sp-sheet-select" class="select-control select-small" title="Select Named Sprite Sheet"></select>
+              <button id="sp-btn-new-sheet" class="icon-btn" title="Create a new named Sprite Sheet">+ Sheet</button>
+            </span>
 
-            <label>Sprite Size:</label>
+            <label>Size:</label>
             <select id="sp-size-select" class="select-control select-small">
               <option value="8">8 × 8 px</option>
               <option value="16">16 × 16 px</option>
+              <option value="24">24 × 24 px</option>
               <option value="32">32 × 32 px</option>
+              <option value="48">48 × 48 px</option>
+              <option value="64">64 × 64 px</option>
             </select>
 
-            <label>Sheet Grid:</label>
-            <select id="sp-sheet-dim-select" class="select-control select-small" title="Number of sprites in this sheet">
-              <option value="4x4">4 × 4 (16 sprites)</option>
-              <option value="6x6">6 × 6 (36 sprites)</option>
-              <option value="8x8">8 × 8 (64 sprites)</option>
-            </select>
+            <span class="sheet-only-ctrl">
+              <label>Sheet Grid:</label>
+              <select id="sp-sheet-dim-select" class="select-control select-small" title="Number of sprites in this sheet">
+                <option value="4x4">4 × 4 (16 sprites)</option>
+                <option value="6x6">6 × 6 (36 sprites)</option>
+                <option value="8x8">8 × 8 (64 sprites)</option>
+              </select>
 
-            <label class="checkbox-label">
-              <input type="checkbox" id="sp-seamless-toggle" checked />
-              🔄 8-Way Seamless View
-            </label>
+              <label class="checkbox-label">
+                <input type="checkbox" id="sp-seamless-toggle" checked />
+                🔄 8-Way Seamless View
+              </label>
+            </span>
 
             <label class="checkbox-label">
               <input type="checkbox" id="sp-grid-toggle" checked />
@@ -142,16 +375,19 @@ export class SpriteEditorController {
           </div>
 
           <div class="sprite-toolbar-group">
-            <button id="sp-btn-load-py" class="btn btn-small" title="Load PALETTE, SPRITE_SHEETS & TILEMAPS from sprites_data.py">
-              📥 Load .py
+            <button id="sp-btn-load-py" class="btn btn-small sheet-only-ctrl" title="Reload PALETTE, SPRITE_SHEETS & TILEMAPS from sprites_data.py">
+              📥 Reload
             </button>
-            <button id="sp-btn-save-py" class="btn btn-small btn-run" title="Save PALETTE, SPRITE_SHEETS & TILEMAPS into sprites_data.py">
-              🐍 Save to sprites_data.py
+            <button id="sp-btn-save-py" class="btn btn-small btn-run sheet-only-ctrl" title="Save PALETTE, SPRITE_SHEETS & TILEMAPS into sprites_data.py">
+              💾 Save Sheet
             </button>
-            <button id="sp-btn-export-png" class="btn btn-small" title="Download active Sprite Sheet as PNG">
-              🖼 Export .PNG
+            <button id="sp-btn-save-png" class="btn btn-small btn-run png-only-ctrl" title="Save this PNG back to your workspace">
+              💾 Save .PNG
             </button>
-            <label class="btn btn-small" title="Import a PNG into current sprite">
+            <button id="sp-btn-export-png" class="btn btn-small" title="Download as PNG file">
+              ⬇ Export .PNG
+            </button>
+            <label class="btn btn-small" title="Import a PNG from your computer">
               📂 Import .PNG
               <input type="file" id="sp-input-import-png" accept="image/png" class="hidden-file-input" />
             </label>
@@ -203,7 +439,7 @@ export class SpriteEditorController {
             </div>
 
             <!-- 8-Way Seamless Tiling Neighbor Selector -->
-            <div class="sprite-card">
+            <div class="sprite-card sheet-only-ctrl">
               <div class="section-header">
                 <span>🧭 8-WAY SEAMLESS NEIGHBORS</span>
                 <button id="sp-btn-neighbors-self" class="icon-btn" title="Set all 8 surrounding preview tiles to Self">All Self</button>
@@ -222,14 +458,14 @@ export class SpriteEditorController {
             <div class="pixel-canvas-stage">
               <canvas id="sp-pixel-canvas" width="384" height="384"></canvas>
             </div>
-            <div class="pixel-stage-legend">
+            <div class="pixel-stage-legend sheet-only-ctrl">
               <span>Center square = <strong>Active Editable Sprite</strong></span>
               <span>Outer 8 squares = <strong>Live Seamless Tiling Neighbors</strong> (draw right across the borders!)</span>
             </div>
           </div>
 
           <!-- RIGHT COLUMN: Named Sprite Sheet Grid & Named Level Tilemap Editor -->
-          <div class="sprite-right-col">
+          <div class="sprite-right-col sheet-only-ctrl">
             <!-- Named Sprite Sheet Picker (4x4, 6x6, or 8x8) -->
             <div class="sprite-card">
               <div class="section-header">
@@ -332,6 +568,7 @@ export class SpriteEditorController {
       if (nextSize !== sheet.spriteSize) {
         resizeSpriteSheet(sheet, nextSize, sheet.cols, sheet.rows);
         this.renderAll();
+        this.scheduleAutoSave();
       }
     });
 
@@ -414,6 +651,7 @@ export class SpriteEditorController {
         const sp = this.getActiveSprite();
         sp.layers[this.activeLayerIdx].pixels = prev;
         this.renderAll();
+        this.scheduleAutoSave();
       }
     });
 
@@ -435,6 +673,7 @@ export class SpriteEditorController {
       }
       sp.layers[this.activeLayerIdx].pixels = next;
       this.renderAll();
+      this.scheduleAutoSave();
     });
 
     this.container.querySelector('#sp-btn-flip-h')?.addEventListener('click', () => {
@@ -442,6 +681,7 @@ export class SpriteEditorController {
       const grid = this.getActiveLayerPixels();
       grid.forEach((row) => row.reverse());
       this.renderAll();
+      this.scheduleAutoSave();
     });
 
     this.container.querySelector('#sp-btn-clear')?.addEventListener('click', () => {
@@ -450,6 +690,7 @@ export class SpriteEditorController {
       const sp = this.getActiveSprite();
       sp.layers[this.activeLayerIdx].pixels = createEmptyGrid(sheet.spriteSize, 0);
       this.renderAll();
+      this.scheduleAutoSave();
     });
 
     this.container.querySelector('#sp-btn-merge-layers')?.addEventListener('click', () => {
@@ -494,18 +735,21 @@ export class SpriteEditorController {
       this.updateActiveHeader();
     });
 
-    // Save / Load Python Arrays (`sprites_data.py`)
+    // Save / Load Python Arrays (`sprites_data.py`) or Single PNG
     this.container.querySelector('#sp-btn-save-py')?.addEventListener('click', () => {
-      const pyCode = serializeSpriteProjectToPython(this.data);
-      this.callbacks.onSaveToPythonFile('sprites_data.py', pyCode);
+      this.saveCurrentToWorkspace(false);
+    });
+
+    this.container.querySelector('#sp-btn-save-png')?.addEventListener('click', () => {
+      this.saveCurrentToWorkspace(false);
     });
 
     this.container.querySelector('#sp-btn-load-py')?.addEventListener('click', () => {
-      const pyCode = this.callbacks.onReadPythonFile('sprites_data.py');
+      const pyCode = this.callbacks.onReadPythonFile(this.activePythonFilename);
       if (pyCode) {
-        this.loadFromPythonString(pyCode);
+        this.loadFromPythonString(pyCode, this.activePythonFilename);
       } else {
-        alert('No sprites_data.py found in project yet! Click "🐍 Save to sprites_data.py" first.');
+        alert(`No ${this.activePythonFilename} found in project yet!`);
       }
     });
 
@@ -527,10 +771,14 @@ export class SpriteEditorController {
     this.pixelCanvas.addEventListener('mousedown', (e) => this.handlePixelPointerDown(e));
     this.pixelCanvas.addEventListener('mousemove', (e) => this.handlePixelPointerMove(e));
     window.addEventListener('mouseup', () => {
+      const wasEditing = this.isDrawing || this.isPaintingMap;
       this.isDrawing = false;
       this.dragStartCell = null;
       this.dragSnapshot = null;
       this.isPaintingMap = false;
+      if (wasEditing) {
+        this.scheduleAutoSave();
+      }
     });
 
     // Sprite Sheet Picker Click
@@ -606,6 +854,7 @@ export class SpriteEditorController {
   }
 
   private handlePixelPointerDown(e: MouseEvent): void {
+    if (this.readOnly) return;
     const cell = this.getSpriteCellFromEvent(e);
     if (!cell) return;
 
@@ -631,6 +880,7 @@ export class SpriteEditorController {
     } else if (this.activeTool === 'bucket') {
       this.floodFill(pixels, cell.x, cell.y, pixels[cell.y][cell.x], this.activeColorIdx);
       this.isDrawing = false;
+      this.scheduleAutoSave();
     }
 
     this.renderAllCanvases();
@@ -741,6 +991,7 @@ export class SpriteEditorController {
   }
 
   private paintTilemapAtEvent(e: MouseEvent): void {
+    if (this.readOnly) return;
     const map = this.getActiveMap();
     const rect = this.mapCanvas.getBoundingClientRect();
     const col = Math.floor(((e.clientX - rect.left) / rect.width) * map.cols);
@@ -778,7 +1029,14 @@ export class SpriteEditorController {
 
     const sizeSelect = this.container.querySelector('#sp-size-select') as HTMLSelectElement;
     if (sizeSelect) {
-      sizeSelect.value = String(sheet.spriteSize);
+      const sz = String(sheet.spriteSize);
+      if (!Array.from(sizeSelect.options).some((o) => o.value === sz)) {
+        const opt = document.createElement('option');
+        opt.value = sz;
+        opt.textContent = `${sheet.spriteSize} × ${sheet.spriteSize} px`;
+        sizeSelect.appendChild(opt);
+      }
+      sizeSelect.value = sz;
     }
 
     const sheetDimSelect = this.container.querySelector('#sp-sheet-dim-select') as HTMLSelectElement;
@@ -822,7 +1080,10 @@ export class SpriteEditorController {
     const sp = this.getActiveSprite();
     const label = this.container.querySelector('#sp-active-label');
     if (label) {
-      label.textContent = `🎯 [${sheet.name}] SPRITE #${this.activeSpriteIdx} (${sp.name}) — ${sheet.spriteSize}×${sheet.spriteSize}`;
+      label.textContent =
+        this.mode === 'png'
+          ? `🖼️ PNG EDITOR: ${this.activePngFilename} (${sheet.spriteSize}×${sheet.spriteSize} px)`
+          : `🎯 [${sheet.name}] SPRITE #${this.activeSpriteIdx} (${sp.name}) — ${sheet.spriteSize}×${sheet.spriteSize}`;
     }
     const sheetTitle = this.container.querySelector('#sp-sheet-title');
     if (sheetTitle) {
@@ -1142,8 +1403,13 @@ export class SpriteEditorController {
     }
 
     const link = document.createElement('a');
-    link.download = `${sheet.name}_${sheet.spriteSize}x${sheet.spriteSize}.png`;
-    link.href = offscreen.toDataURL('image/png');
+    if (this.mode === 'png') {
+      link.download = this.activePngFilename.split('/').pop() || 'sprite.png';
+      link.href = this.renderActiveSpriteToPngDataUrl();
+    } else {
+      link.download = `${sheet.name}_${sheet.spriteSize}x${sheet.spriteSize}.png`;
+      link.href = offscreen.toDataURL('image/png');
+    }
     link.click();
   }
 
@@ -1184,10 +1450,14 @@ export class SpriteEditorController {
   }
 
   private findNearestPaletteIndex(r: number, g: number, b: number): number {
+    return this.findNearestPaletteIndexIn(this.data.palette, r, g, b);
+  }
+
+  private findNearestPaletteIndexIn(palette: string[], r: number, g: number, b: number): number {
     let bestIdx = 1;
     let bestDist = Infinity;
-    for (let i = 1; i < this.data.palette.length; i++) {
-      const hex = this.data.palette[i].replace('#', '');
+    for (let i = 1; i < palette.length; i++) {
+      const hex = palette[i].replace('#', '');
       const pr = parseInt(hex.slice(0, 2), 16) || 0;
       const pg = parseInt(hex.slice(2, 4), 16) || 0;
       const pb = parseInt(hex.slice(4, 6), 16) || 0;

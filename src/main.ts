@@ -3,8 +3,18 @@ import { analyzePythonCodeForLearners, type PythonDiagnostic } from './diagnosti
 import { PythonPygameRuntime } from './runtime/python-runtime';
 import { TutorService } from './llm/tutor-service';
 import type { LLMBackendId, LLMDebugEvent, TutorCodeContext } from './llm/types';
-import { CHEATSHEETS, WorkspaceStore } from './workspace/templates';
+import {
+  CHEATSHEETS,
+  classifyWorkspaceFile,
+  fileToDataUrl,
+  getDefaultSpritesDataPy,
+  STARTER_TEMPLATES,
+  WorkspaceStore,
+} from './workspace/templates';
+import { createBlankPngDataUrl } from './workspace/starter-assets';
+import { createStarterSoundWav } from './audio-editor/wav-codec';
 import { SpriteEditorController } from './sprite-editor/sprite-editor';
+import { WavEditorController } from './audio-editor/wav-editor';
 import { initPwa } from './pwa/register-pwa';
 
 function formatSimpleMarkdown(text: string): string {
@@ -18,20 +28,51 @@ function formatSimpleMarkdown(text: string): string {
     .replace(/\n/g, '<br/>');
 }
 
-function bootstrapPywlet(): void {
+async function bootstrapPywlet(): Promise<void> {
   const workspace = new WorkspaceStore();
+  await workspace.init();
+
   let currentDiagnostics: PythonDiagnostic[] = [];
   let activeBannerDiagnostic: PythonDiagnostic | null = null;
+  let workspaceBrowserOpen = false;
+  let spriteSheetViewMode: 'visual' | 'code' = 'visual';
+  let spriteDataWriteProtected = true;
 
   // DOM Elements
   const workspaceEl = document.querySelector('.workspace') as HTMLElement;
   const monacoContainer = document.getElementById('monaco-container')!;
   const spriteStudioContainer = document.getElementById('sprite-studio-container')!;
-  const tabCodeEditor = document.getElementById('tab-code-editor')!;
-  const tabSpriteStudio = document.getElementById('tab-sprite-studio')!;
+  const wavEditorContainer = document.getElementById('wav-editor-container')!;
+
+  const topbarWorkspaceNameEl = document.getElementById('topbar-workspace-name')!;
+  const btnActiveWorkspacePill = document.getElementById('btn-active-workspace-pill')!;
+  const sidebarWorkspaceNameEl = document.getElementById('sidebar-workspace-name')!;
+  const btnToggleWorkspaceBrowser = document.getElementById('btn-toggle-workspace-browser')!;
+  const workspaceBrowserPanel = document.getElementById('workspace-browser-panel')!;
+  const workspaceFilesPanel = document.getElementById('workspace-files-panel')!;
+  const savedWorkspacesListEl = document.getElementById('saved-workspaces-list')!;
+  const savedWorkspacesCountEl = document.getElementById('saved-workspaces-count')!;
+  const exampleWorkspacesListEl = document.getElementById('example-workspaces-list')!;
+  const btnNewEmptyWorkspace = document.getElementById('btn-new-empty-workspace')!;
+
   const fileListEl = document.getElementById('file-list')!;
+  const newFileToolbarEl = document.getElementById('new-file-toolbar')!;
+  const labelImportFileEl = document.getElementById('label-import-workspace-file')!;
+  const btnCloneExampleSidebar = document.getElementById('btn-clone-example-sidebar')!;
+  const readonlyWorkspaceBannerEl = document.getElementById('readonly-workspace-banner')!;
+  const btnCloneActiveExample = document.getElementById('btn-clone-active-example')!;
+  const activeFileIconEl = document.getElementById('active-file-icon')!;
   const activeFilenameEl = document.getElementById('active-filename')!;
+  const spriteSheetSubtabsEl = document.getElementById('sprite-sheet-subtabs')!;
+  const tabSpriteVisual = document.getElementById('tab-sprite-visual')!;
+  const tabSpriteCode = document.getElementById('tab-sprite-code')!;
+  const protectedFileBannerEl = document.getElementById('protected-file-banner')!;
+  const protectedBannerTitleEl = document.getElementById('protected-banner-title')!;
+  const protectedBannerDescEl = document.getElementById('protected-banner-desc')!;
+  const btnToggleWriteProtect = document.getElementById('btn-toggle-write-protect')!;
+
   const syntaxBadgeEl = document.getElementById('syntax-badge')!;
+  const codeEditorActionsEl = document.getElementById('code-editor-actions')!;
   const diagnosticBannerEl = document.getElementById('live-diagnostic-banner')!;
   const diagnosticTitleEl = document.getElementById('diagnostic-title')!;
   const diagnosticMessageEl = document.getElementById('diagnostic-message')!;
@@ -54,10 +95,13 @@ function bootstrapPywlet(): void {
   const btnTheaterExit = document.getElementById('btn-theater-exit')!;
 
   // Buttons & Controls
-  const templateSelect = document.getElementById('template-select') as HTMLSelectElement;
   const btnOpenFolder = document.getElementById('btn-open-folder')!;
-  const btnSaveProject = document.getElementById('btn-save-project')!;
-  const btnNewFile = document.getElementById('btn-new-file')!;
+  const btnSaveProject = document.getElementById('btn-save-project') as HTMLButtonElement;
+  const btnNewPy = document.getElementById('btn-new-py')!;
+  const btnNewPng = document.getElementById('btn-new-png')!;
+  const btnNewWav = document.getElementById('btn-new-wav')!;
+  const btnNewSpritesSheet = document.getElementById('btn-new-sprites-sheet')!;
+  const inputImportFile = document.getElementById('input-import-workspace-file') as HTMLInputElement;
   const btnRun = document.getElementById('btn-run') as HTMLButtonElement;
   const btnStop = document.getElementById('btn-stop') as HTMLButtonElement;
   const btnExplainSelection = document.getElementById('btn-explain-selection')!;
@@ -84,6 +128,11 @@ function bootstrapPywlet(): void {
   const aiDebugLogEl = document.getElementById('ai-debug-log')!;
   const aiDebugStreamEl = document.getElementById('ai-debug-stream')!;
 
+  function appendConsole(line: string): void {
+    consoleOutputEl.textContent += `\n${line}`;
+    consoleOutputEl.scrollTop = consoleOutputEl.scrollHeight;
+  }
+
   function appendDebugLog(event: LLMDebugEvent): void {
     if (event.data?.device) {
       const isGpu = event.data.device === 'webgpu';
@@ -92,7 +141,6 @@ function bootstrapPywlet(): void {
         : `⚙️ ${event.data.adapterInfo || 'SIMD WASM'}`;
       gpuDeviceBadgeEl.className = isGpu ? 'badge badge-ok' : 'badge badge-warn';
 
-      // Auto-expand the Chrome WebGPU flags tip if WebGPU fell back to SwiftShader or WASM
       if (event.stage === 'gpu-probe' && event.data.webgpuAvailable === false) {
         chromeFlagsHelpDrawerEl.classList.remove('hidden');
       }
@@ -132,7 +180,7 @@ function bootstrapPywlet(): void {
     aiDebugLogEl.scrollTop = aiDebugLogEl.scrollHeight;
   }
 
-  // 1. Initialize Modular Local AI Tutor Service with Progress + Debug Telemetry
+  // 1. Initialize Modular Local AI Tutor Service
   const tutor = new TutorService(
     (progress) => {
       llmStatusTextEl.textContent = progress.message;
@@ -141,17 +189,28 @@ function bootstrapPywlet(): void {
       appendDebugLog(debugEvent);
     }
   );
-
-  // Probe WebGPU immediately on startup so the debug panel shows GPU status right away
   tutor.probeGPU();
 
-  // 2. Initialize Monaco Code Editor
+  // 2. Initialize Editors (Monaco, Sprite/PNG Studio, WAV Audio Studio)
   const editor = new CodeEditorController(
     monacoContainer,
-    workspace.getActiveFileContent(),
+    '',
     (updatedCode) => {
+      if (workspace.isActiveWorkspaceReadOnly()) {
+        return;
+      }
+      const activeName = workspace.getActiveFileName();
+      const kind = classifyWorkspaceFile(activeName, workspace.getFileContent(activeName));
+      if (kind === 'sprite-sheet' && spriteDataWriteProtected) {
+        return;
+      }
       workspace.updateActiveFileContent(updatedCode);
-      runLiveDiagnostics(updatedCode);
+      if (kind === 'python') {
+        runLiveDiagnostics(updatedCode);
+      } else if (kind === 'sprite-sheet') {
+        // Keep Sprite Studio synced when manually unlocked
+        spriteEditor.loadFromPythonString(updatedCode, activeName);
+      }
     },
     (cursorCtx) => {
       const target = cursorCtx.selectedText || cursorCtx.cursorWord || cursorCtx.lineText.trim();
@@ -159,61 +218,45 @@ function bootstrapPywlet(): void {
     }
   );
 
-  // 2b. Initialize Sprite & Tilemap Studio (reads/writes `sprites_data.py` Python arrays)
   const spriteEditor = new SpriteEditorController(spriteStudioContainer, {
     onSaveToPythonFile: (filename, pyCode) => {
       workspace.setFileContent(filename, pyCode);
-      if (workspace.getActiveFileName() === filename) {
+      if (workspace.getActiveFileName() === filename && spriteSheetViewMode === 'code') {
         editor.setValue(pyCode);
       }
       renderFileList();
-      consoleOutputEl.textContent += `\n🎨 Saved PALETTE, SPRITES, and TILEMAP arrays to ${filename}!`;
-      consoleOutputEl.scrollTop = consoleOutputEl.scrollHeight;
     },
-    onReadPythonFile: (filename) => {
-      return workspace.getFileContent(filename);
+    onReadPythonFile: (filename) => workspace.getFileContent(filename),
+    onSavePngFile: (filename, dataUrl) => {
+      workspace.setFileContent(filename, dataUrl);
+      renderFileList();
     },
   });
 
-  // Load initial `sprites_data.py` if present in workspace
-  const initialSpritePy = workspace.getFileContent('sprites_data.py');
-  if (initialSpritePy) {
-    spriteEditor.loadFromPythonString(initialSpritePy);
-  }
+  const wavEditor = new WavEditorController(wavEditorContainer, {
+    onSaveWavFile: (filename, dataUrl) => {
+      workspace.setFileContent(filename, dataUrl);
+      renderFileList();
+    },
+  });
 
-  function switchCenterView(mode: 'code' | 'sprite'): void {
-    if (mode === 'code') {
-      tabCodeEditor.classList.add('active');
-      tabSpriteStudio.classList.remove('active');
-      monacoContainer.classList.remove('hidden');
-      spriteStudioContainer.classList.add('hidden');
-    } else {
-      // Sync latest `sprites_data.py` edits if the student edited the numbers in Monaco!
-      const pyFromWorkspace = workspace.getFileContent('sprites_data.py');
-      if (pyFromWorkspace) {
-        spriteEditor.loadFromPythonString(pyFromWorkspace);
-      }
-      tabCodeEditor.classList.remove('active');
-      tabSpriteStudio.classList.add('active');
-      monacoContainer.classList.add('hidden');
-      spriteStudioContainer.classList.remove('hidden');
-      spriteEditor.renderAll();
+  function syncSpriteProjectFromWorkspace(): void {
+    const files = workspace.getFiles();
+    const spriteFile = Object.keys(files).find(
+      (f) => classifyWorkspaceFile(f, files[f]) === 'sprite-sheet'
+    );
+    if (spriteFile && files[spriteFile]) {
+      spriteEditor.loadFromPythonString(files[spriteFile], spriteFile);
     }
   }
-
-  tabCodeEditor.addEventListener('click', () => switchCenterView('code'));
-  tabSpriteStudio.addEventListener('click', () => switchCenterView('sprite'));
 
   // 3. Initialize Python + Pygame Canvas Runtime
   const runtime = new PythonPygameRuntime(canvasEl, {
     getSpriteProjectData: () => spriteEditor.getProjectData(),
-    onStdout: (line) => {
-      consoleOutputEl.textContent += `\n${line}`;
-      consoleOutputEl.scrollTop = consoleOutputEl.scrollHeight;
-    },
+    getWorkspaceFile: (filename) => workspace.getFileContent(filename),
+    onStdout: (line) => appendConsole(line),
     onStderr: (line, friendly) => {
-      consoleOutputEl.textContent += `\n❌ ${line}`;
-      consoleOutputEl.scrollTop = consoleOutputEl.scrollHeight;
+      appendConsole(`❌ ${line}`);
       if (friendly) {
         showDiagnosticBanner({
           line: friendly.line,
@@ -270,33 +313,369 @@ function bootstrapPywlet(): void {
     }
   }
 
-  // 5. File List & Cheatsheets Rendering
+  // 5. Center Pane Unified File Router
+  function updateProtectedBannerUI(): void {
+    if (spriteDataWriteProtected) {
+      protectedFileBannerEl.classList.remove('unlocked');
+      protectedBannerTitleEl.textContent = '🔒 Write-Protected (Read-Only):';
+      protectedBannerDescEl.innerHTML =
+        '<code>sprites_data.py</code> is protected so the Visual Sprite &amp; Map Studio can always parse it safely.';
+      btnToggleWriteProtect.textContent = '🔓 Unlock Manual Editing';
+      tabSpriteCode.textContent = '🔒 Code View';
+    } else {
+      protectedFileBannerEl.classList.add('unlocked');
+      protectedBannerTitleEl.textContent = '⚠️ Manual Editing Unlocked:';
+      protectedBannerDescEl.innerHTML =
+        'Be careful to keep <code>PALETTE</code>, <code>SPRITE_SHEETS</code>, and <code>TILEMAPS</code> valid Python so Visual Studio can parse them.';
+      btnToggleWriteProtect.textContent = '🔒 Re-lock Protection';
+      tabSpriteCode.textContent = '🔓 Code View (Unlocked)';
+    }
+  }
+
+  function openActiveFileInEditor(resetSpriteSubtab = true): void {
+    const filename = workspace.getActiveFileName();
+    const content = workspace.getActiveFileContent();
+    const kind = classifyWorkspaceFile(filename, content);
+    const isWsReadOnly = workspace.isActiveWorkspaceReadOnly();
+
+    wavEditor.stopPlayback();
+    activeFilenameEl.textContent = filename;
+
+    // Sync workspace read-only state across banners and editors
+    readonlyWorkspaceBannerEl.classList.toggle('hidden', !isWsReadOnly);
+    btnSaveProject.disabled = isWsReadOnly;
+    spriteEditor.setReadOnly(isWsReadOnly);
+    wavEditor.setReadOnly(isWsReadOnly);
+
+    // Reset all editor containers
+    monacoContainer.classList.add('hidden');
+    spriteStudioContainer.classList.add('hidden');
+    wavEditorContainer.classList.add('hidden');
+    spriteSheetSubtabsEl.classList.add('hidden');
+    protectedFileBannerEl.classList.add('hidden');
+    syntaxBadgeEl.classList.add('hidden');
+    codeEditorActionsEl.classList.add('hidden');
+    showDiagnosticBanner(null);
+
+    if (kind === 'python') {
+      activeFileIconEl.textContent = '🐍';
+      monacoContainer.classList.remove('hidden');
+      syntaxBadgeEl.classList.remove('hidden');
+      codeEditorActionsEl.classList.remove('hidden');
+      editor.setReadOnly(
+        isWsReadOnly,
+        '📖 This is a read-only Example Workspace. Click "📋 Clone to Edit" above to create your own editable copy!'
+      );
+      editor.setValue(content);
+      editor.layout();
+      runLiveDiagnostics(content);
+    } else if (kind === 'sprite-sheet') {
+      activeFileIconEl.textContent = '🎨';
+      spriteSheetSubtabsEl.classList.remove('hidden');
+
+      if (resetSpriteSubtab) {
+        spriteSheetViewMode = 'visual';
+        spriteDataWriteProtected = true;
+      }
+
+      tabSpriteVisual.classList.toggle('active', spriteSheetViewMode === 'visual');
+      tabSpriteCode.classList.toggle('active', spriteSheetViewMode === 'code');
+      updateProtectedBannerUI();
+
+      if (spriteSheetViewMode === 'visual') {
+        spriteStudioContainer.classList.remove('hidden');
+        spriteEditor.loadFromPythonString(content, filename);
+        spriteEditor.setReadOnly(isWsReadOnly);
+      } else {
+        if (!isWsReadOnly) {
+          protectedFileBannerEl.classList.remove('hidden');
+        }
+        codeEditorActionsEl.classList.remove('hidden');
+        monacoContainer.classList.remove('hidden');
+        editor.setReadOnly(
+          isWsReadOnly || spriteDataWriteProtected,
+          isWsReadOnly
+            ? '📖 This is a read-only Example Workspace. Click "📋 Clone to Edit" above to create your own editable copy!'
+            : undefined
+        );
+        editor.setValue(content);
+        editor.layout();
+      }
+    } else if (kind === 'png') {
+      activeFileIconEl.textContent = '🖼️';
+      spriteStudioContainer.classList.remove('hidden');
+      spriteEditor.loadPngFile(filename, content);
+      spriteEditor.setReadOnly(isWsReadOnly);
+    } else if (kind === 'wav') {
+      activeFileIconEl.textContent = '🔊';
+      wavEditorContainer.classList.remove('hidden');
+      wavEditor.loadWavFile(filename, content);
+      wavEditor.setReadOnly(isWsReadOnly);
+    }
+
+    renderFileList();
+  }
+
+  tabSpriteVisual.addEventListener('click', () => {
+    spriteSheetViewMode = 'visual';
+    // Re-engage write protection automatically when returning to visual mode
+    spriteDataWriteProtected = true;
+    openActiveFileInEditor(false);
+  });
+
+  tabSpriteCode.addEventListener('click', () => {
+    spriteSheetViewMode = 'code';
+    openActiveFileInEditor(false);
+  });
+
+  btnToggleWriteProtect.addEventListener('click', () => {
+    if (spriteDataWriteProtected) {
+      const ok = confirm(
+        'Unlock manual editing for sprites_data.py?\n\nEditing the raw Python arrays by hand can break Visual Sprite Studio parsing if the syntax becomes invalid. You can re-lock protection at any time.'
+      );
+      if (!ok) return;
+      spriteDataWriteProtected = false;
+    } else {
+      spriteDataWriteProtected = true;
+      const activeName = workspace.getActiveFileName();
+      const latest = workspace.getFileContent(activeName);
+      if (latest) {
+        spriteEditor.loadFromPythonString(latest, activeName);
+      }
+    }
+    editor.setReadOnly(spriteDataWriteProtected);
+    updateProtectedBannerUI();
+  });
+
+  // 6. Left Sidebar: Workspace Browser & File List Rendering
+  function setWorkspaceBrowserOpen(open: boolean): void {
+    workspaceBrowserOpen = open;
+    workspaceBrowserPanel.classList.toggle('hidden', !open);
+    workspaceFilesPanel.classList.toggle('hidden', open);
+    btnToggleWorkspaceBrowser.textContent = open ? '← Back to Files' : '📚 Workspaces';
+    btnToggleWorkspaceBrowser.classList.toggle('active-toggle', open);
+    if (open) {
+      renderWorkspaceBrowser();
+    }
+  }
+
+  function updateWorkspaceHeaders(): void {
+    const ws = workspace.getActiveWorkspace();
+    const isRo = workspace.isActiveWorkspaceReadOnly();
+    topbarWorkspaceNameEl.textContent = isRo ? `📖 ${ws.name}` : ws.name;
+    sidebarWorkspaceNameEl.textContent = isRo ? `📖 ${ws.name}` : ws.name;
+  }
+
+  function renderWorkspaceBrowser(): void {
+    const saved = workspace.listWorkspaces();
+    const activeId = workspace.getActiveWorkspace().id;
+    savedWorkspacesCountEl.textContent = String(saved.length);
+    savedWorkspacesListEl.innerHTML = '';
+
+    for (const ws of saved) {
+      const li = document.createElement('li');
+      li.className = `ws-card ${ws.id === activeId ? 'active' : ''}`;
+      const fileCount = Object.keys(ws.files).length;
+      const dateLabel = new Date(ws.updatedAt).toLocaleDateString();
+
+      li.innerHTML = `
+        <div class="ws-card-main">
+          <div class="ws-card-title">${ws.id === activeId ? '🟢 ' : '📁 '}<span></span></div>
+          <div class="ws-card-meta">${fileCount} file${fileCount === 1 ? '' : 's'} · ${dateLabel}</div>
+        </div>
+        <div class="ws-card-actions">
+          <button class="icon-btn ws-rename-btn" title="Rename workspace">✏️</button>
+          <button class="icon-btn ws-dup-btn" title="Duplicate workspace">📋</button>
+          <button class="icon-btn ws-del-btn" title="Delete workspace">🗑</button>
+        </div>
+      `;
+      li.querySelector('.ws-card-title span')!.textContent = ws.name;
+
+      li.querySelector('.ws-card-main')!.addEventListener('click', () => {
+        runtime.stop();
+        workspace.openWorkspace(ws.id);
+        syncSpriteProjectFromWorkspace();
+        updateWorkspaceHeaders();
+        setWorkspaceBrowserOpen(false);
+        openActiveFileInEditor(true);
+      });
+
+      li.querySelector('.ws-rename-btn')!.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const nextName = prompt('Rename workspace:', ws.name);
+        if (nextName && nextName.trim()) {
+          workspace.renameWorkspace(ws.id, nextName.trim());
+          updateWorkspaceHeaders();
+          renderWorkspaceBrowser();
+        }
+      });
+
+      li.querySelector('.ws-dup-btn')!.addEventListener('click', (e) => {
+        e.stopPropagation();
+        runtime.stop();
+        workspace.duplicateWorkspace(ws.id);
+        syncSpriteProjectFromWorkspace();
+        updateWorkspaceHeaders();
+        setWorkspaceBrowserOpen(false);
+        openActiveFileInEditor(true);
+      });
+
+      li.querySelector('.ws-del-btn')!.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (!confirm(`Delete workspace "${ws.name}" from browser storage?`)) return;
+        runtime.stop();
+        workspace.deleteWorkspace(ws.id);
+        syncSpriteProjectFromWorkspace();
+        updateWorkspaceHeaders();
+        renderWorkspaceBrowser();
+        openActiveFileInEditor(true);
+      });
+
+      savedWorkspacesListEl.appendChild(li);
+    }
+
+    // Example workspaces (click card to preview read-only, click Clone to clone & switch)
+    exampleWorkspacesListEl.innerHTML = '';
+    const activeExampleId = workspace.getActiveExampleTemplateId();
+    for (const tpl of Object.values(STARTER_TEMPLATES)) {
+      const li = document.createElement('li');
+      li.className = `ws-card ws-example-card ${activeExampleId === tpl.id ? 'active' : ''}`;
+      li.innerHTML = `
+        <div class="ws-card-main" title="Open example in read-only preview mode">
+          <div class="ws-card-title">${tpl.icon} <span></span></div>
+          <div class="ws-card-meta"></div>
+        </div>
+        <button class="btn btn-small btn-Ask ws-clone-btn" title="Clone this example into your saved workspaces and switch to it">Clone</button>
+      `;
+      li.querySelector('.ws-card-title span')!.textContent = tpl.name;
+      li.querySelector('.ws-card-meta')!.textContent = tpl.description;
+
+      li.querySelector('.ws-card-main')!.addEventListener('click', () => {
+        runtime.stop();
+        workspace.openExampleWorkspaceReadOnly(tpl.id);
+        syncSpriteProjectFromWorkspace();
+        updateWorkspaceHeaders();
+        setWorkspaceBrowserOpen(false);
+        openActiveFileInEditor(true);
+        appendConsole(`📖 Opened example "${tpl.name}" in read-only mode. Click "Clone to Edit" to make your own copy!`);
+      });
+
+      li.querySelector('.ws-clone-btn')!.addEventListener('click', (e) => {
+        e.stopPropagation();
+        runtime.stop();
+        const created = workspace.cloneExampleWorkspace(tpl.id);
+        syncSpriteProjectFromWorkspace();
+        updateWorkspaceHeaders();
+        setWorkspaceBrowserOpen(false);
+        openActiveFileInEditor(true);
+        appendConsole(`🌟 Cloned example "${tpl.name}" as "${created.name}".`);
+      });
+
+      exampleWorkspacesListEl.appendChild(li);
+    }
+  }
+
   function renderFileList(): void {
     fileListEl.innerHTML = '';
     const active = workspace.getActiveFileName();
-    activeFilenameEl.textContent = active;
+    const files = workspace.getFiles();
+    const isWsReadOnly = workspace.isActiveWorkspaceReadOnly();
+
+    // Toggle file-creation controls vs "Clone Example to Edit" button
+    newFileToolbarEl.classList.toggle('hidden', isWsReadOnly);
+    labelImportFileEl.classList.toggle('hidden', isWsReadOnly);
+    btnCloneExampleSidebar.classList.toggle('hidden', !isWsReadOnly);
+
+    // Hide "+ Sheet" button if sprites_data.py already exists
+    const hasSpriteSheet = Object.keys(files).some(
+      (f) => classifyWorkspaceFile(f, files[f]) === 'sprite-sheet'
+    );
+    btnNewSpritesSheet.classList.toggle('hidden', hasSpriteSheet || isWsReadOnly);
 
     for (const filename of workspace.getFileNames()) {
+      const content = files[filename];
+      const kind = classifyWorkspaceFile(filename, content);
       const li = document.createElement('li');
       li.className = `file-item ${filename === active ? 'active' : ''}`;
-      li.innerHTML = `<span>📄 ${filename}</span>`;
+
+      const leftWrap = document.createElement('div');
+      leftWrap.className = 'file-item-label';
+
+      if (kind === 'png' && content.startsWith('data:image')) {
+        const thumb = document.createElement('img');
+        thumb.className = 'file-thumb';
+        thumb.src = content;
+        thumb.alt = filename;
+        leftWrap.appendChild(thumb);
+      } else {
+        const iconSpan = document.createElement('span');
+        iconSpan.textContent =
+          kind === 'sprite-sheet' ? '🎨' : kind === 'wav' ? '🔊' : kind === 'png' ? '🖼️' : '🐍';
+        leftWrap.appendChild(iconSpan);
+      }
+
+      const nameSpan = document.createElement('span');
+      nameSpan.className = 'file-item-name';
+      nameSpan.textContent = filename;
+      nameSpan.title = filename;
+      leftWrap.appendChild(nameSpan);
+
+      const actionsWrap = document.createElement('div');
+      actionsWrap.className = 'file-item-actions';
+
+      if (kind === 'png' || kind === 'wav') {
+        const copyBtn = document.createElement('button');
+        copyBtn.className = 'icon-btn file-mini-btn';
+        copyBtn.textContent = '📋';
+        copyBtn.title = `Copy path "${filename}"`;
+        copyBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const snippet = `"${filename}"`;
+          if (navigator.clipboard) {
+            navigator.clipboard.writeText(snippet).catch(() => {});
+          }
+          appendConsole(`📋 Copied ${snippet} to clipboard.`);
+        });
+        actionsWrap.appendChild(copyBtn);
+      }
+
+      if (!isWsReadOnly && Object.keys(files).length > 1) {
+        const delBtn = document.createElement('button');
+        delBtn.className = 'icon-btn file-mini-btn';
+        delBtn.textContent = '✕';
+        delBtn.title = `Delete ${filename}`;
+        delBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          if (!confirm(`Delete "${filename}" from this workspace?`)) return;
+          workspace.deleteFile(filename);
+          openActiveFileInEditor(true);
+        });
+        actionsWrap.appendChild(delBtn);
+      }
+
+      li.appendChild(leftWrap);
+      li.appendChild(actionsWrap);
+
       li.addEventListener('click', () => {
-        const content = workspace.setActiveFile(filename);
-        editor.setValue(content);
-        renderFileList();
-        runLiveDiagnostics(content);
-        switchCenterView('code');
+        workspace.setActiveFile(filename);
+        openActiveFileInEditor(true);
       });
+
       fileListEl.appendChild(li);
     }
   }
 
   function buildTutorContext(): TutorCodeContext {
-    const cursor = editor.getCursorContext();
+    const activeName = workspace.getActiveFileName();
+    const runnable = workspace.getRunnablePythonFile();
+    const isCodeVisible = !monacoContainer.classList.contains('hidden');
+    const cursor = isCodeVisible
+      ? editor.getCursorContext()
+      : { selectedText: '', cursorWord: '', lineNumber: 1, lineText: '' };
     const firstDiag = activeBannerDiagnostic || currentDiagnostics[0];
     return {
-      activeFile: workspace.getActiveFileName(),
-      fullCode: editor.getValue(),
+      activeFile: isCodeVisible ? activeName : runnable?.filename || activeName,
+      fullCode: isCodeVisible ? editor.getValue() : runnable?.code || '',
       selectedText: cursor.selectedText,
       cursorWord: cursor.cursorWord,
       cursorLineNumber: cursor.lineNumber,
@@ -331,7 +710,18 @@ function bootstrapPywlet(): void {
     });
   }
 
-  // 6. Wire UI Events & Focus Mode / Game Full Window & Fullscreen Toggles
+  function runActiveGame(): void {
+    const runnable = workspace.getRunnablePythonFile();
+    if (!runnable) {
+      appendConsole('❌ No runnable Python file found in this workspace.');
+      return;
+    }
+    syncSpriteProjectFromWorkspace();
+    consoleOutputEl.textContent = `▶ Running ${runnable.filename}...`;
+    runtime.runCode(runnable.code);
+  }
+
+  // 7. Wire UI Events & Layout Toggles
   function updateLayoutToggleButtons(): void {
     const leftHidden = workspaceEl.classList.contains('hide-left');
     const rightHidden = workspaceEl.classList.contains('hide-right');
@@ -368,14 +758,126 @@ function bootstrapPywlet(): void {
     updateLayoutToggleButtons();
   });
 
+  btnToggleWorkspaceBrowser.addEventListener('click', () => {
+    setWorkspaceBrowserOpen(!workspaceBrowserOpen);
+  });
+
+  btnActiveWorkspacePill.addEventListener('click', () => {
+    if (workspaceEl.classList.contains('hide-left')) {
+      workspaceEl.classList.remove('hide-left');
+      updateLayoutToggleButtons();
+    }
+    setWorkspaceBrowserOpen(!workspaceBrowserOpen);
+  });
+
+  btnNewEmptyWorkspace.addEventListener('click', () => {
+    const name = prompt('Name your new empty workspace:', 'My Cool Game');
+    if (!name || !name.trim()) return;
+    runtime.stop();
+    workspace.createEmptyWorkspace(name.trim());
+    updateWorkspaceHeaders();
+    setWorkspaceBrowserOpen(false);
+    openActiveFileInEditor(true);
+    appendConsole(`✨ Created empty workspace "${name.trim()}".`);
+  });
+
+  btnOpenFolder.addEventListener('click', async () => {
+    const ok = await workspace.openLocalDirectory();
+    if (ok) {
+      runtime.stop();
+      syncSpriteProjectFromWorkspace();
+      updateWorkspaceHeaders();
+      setWorkspaceBrowserOpen(false);
+      openActiveFileInEditor(true);
+    }
+  });
+
+  function handleCloneActiveExample(): void {
+    const created = workspace.cloneActiveExampleWorkspace();
+    if (!created) return;
+    runtime.stop();
+    syncSpriteProjectFromWorkspace();
+    updateWorkspaceHeaders();
+    openActiveFileInEditor(true);
+    appendConsole(`🌟 Cloned example into editable workspace "${created.name}".`);
+  }
+
+  btnCloneActiveExample.addEventListener('click', handleCloneActiveExample);
+  btnCloneExampleSidebar.addEventListener('click', handleCloneActiveExample);
+
+  btnSaveProject.addEventListener('click', () => {
+    if (workspace.isActiveWorkspaceReadOnly()) {
+      handleCloneActiveExample();
+      return;
+    }
+    workspace.saveToStorage();
+    appendConsole(`💾 Saved workspace "${workspace.getActiveWorkspace().name}" to browser storage.`);
+  });
+
+  btnNewPy.addEventListener('click', () => {
+    const name = prompt('New Python file name:', 'helper.py');
+    if (name && name.trim()) {
+      const clean = name.trim().endsWith('.py') ? name.trim() : `${name.trim()}.py`;
+      workspace.createFile(clean, '# New Python file\n');
+      openActiveFileInEditor(true);
+    }
+  });
+
+  btnNewPng.addEventListener('click', () => {
+    const name = prompt('New PNG image path:', 'assets/hero.png');
+    if (!name || !name.trim()) return;
+    const rawSize = prompt('Pixel canvas size (8, 16, 24, 32, 48, or 64):', '16');
+    const size = Math.max(8, Math.min(64, Number(rawSize) || 16));
+    const clean = name.trim().toLowerCase().endsWith('.png') ? name.trim() : `${name.trim()}.png`;
+    workspace.createFile(clean, createBlankPngDataUrl(size));
+    openActiveFileInEditor(true);
+  });
+
+  btnNewWav.addEventListener('click', () => {
+    const name = prompt('New WAV sound path:', 'assets/laser.wav');
+    if (!name || !name.trim()) return;
+    const clean = name.trim().toLowerCase().endsWith('.wav') ? name.trim() : `${name.trim()}.wav`;
+    workspace.createFile(clean, createStarterSoundWav('boop'));
+    openActiveFileInEditor(true);
+  });
+
+  btnNewSpritesSheet.addEventListener('click', () => {
+    workspace.createFile('sprites_data.py', getDefaultSpritesDataPy());
+    syncSpriteProjectFromWorkspace();
+    openActiveFileInEditor(true);
+  });
+
+  inputImportFile.addEventListener('change', async () => {
+    const file = inputImportFile.files?.[0];
+    inputImportFile.value = '';
+    if (!file) return;
+    const lower = file.name.toLowerCase();
+    try {
+      if (lower.endsWith('.py')) {
+        const text = await file.text();
+        workspace.createFile(file.name, text);
+      } else if (lower.endsWith('.png') || lower.endsWith('.wav')) {
+        const dataUrl = await fileToDataUrl(file);
+        const targetPath = file.name.includes('/') ? file.name : `assets/${file.name}`;
+        workspace.createFile(targetPath, dataUrl);
+      } else {
+        alert('Supported file types: .py, .png, .wav');
+        return;
+      }
+      syncSpriteProjectFromWorkspace();
+      openActiveFileInEditor(true);
+      appendConsole(`📤 Imported ${file.name} into workspace.`);
+    } catch (err: any) {
+      appendConsole(`❌ Failed to import ${file.name}: ${err?.message || err}`);
+    }
+  });
+
   function setTheaterMode(enabled: boolean): void {
     canvasWrapperEl.classList.toggle('theater-mode', enabled);
     theaterToolbarEl.classList.toggle('hidden', !enabled);
     if (enabled) {
-      // Auto-start game if not running yet so the player can immediately play!
       if (!runtime.isRunning()) {
-        consoleOutputEl.textContent = `▶ Running ${workspace.getActiveFileName()}...`;
-        runtime.runCode(editor.getValue());
+        runActiveGame();
       }
       canvasEl.focus();
     }
@@ -394,15 +896,13 @@ function bootstrapPywlet(): void {
   });
 
   btnTheaterRestart.addEventListener('click', () => {
-    consoleOutputEl.textContent = `▶ Restarting ${workspace.getActiveFileName()}...`;
-    runtime.runCode(editor.getValue());
+    runActiveGame();
     canvasEl.focus();
   });
 
   btnFullscreenGame.addEventListener('click', async () => {
     if (!runtime.isRunning()) {
-      consoleOutputEl.textContent = `▶ Running ${workspace.getActiveFileName()}...`;
-      runtime.runCode(editor.getValue());
+      runActiveGame();
     }
     theaterToolbarEl.classList.remove('hidden');
     try {
@@ -413,7 +913,6 @@ function bootstrapPywlet(): void {
       }
       canvasEl.focus();
     } catch {
-      // Fallback to Full Window Theater Mode if browser blocks Fullscreen API
       setTheaterMode(true);
     }
   });
@@ -425,81 +924,38 @@ function bootstrapPywlet(): void {
   });
 
   window.addEventListener('keydown', (e) => {
-    // Esc exits Full Window Theater Mode
     if (e.key === 'Escape' && canvasWrapperEl.classList.contains('theater-mode')) {
       setTheaterMode(false);
     }
-    // Ctrl+B toggles Focus Mode
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'b') {
       e.preventDefault();
       btnFocusMode.click();
     }
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+      e.preventDefault();
+      workspace.saveToStorage();
+      appendConsole(`💾 Saved workspace "${workspace.getActiveWorkspace().name}".`);
+    }
   });
 
-  btnToggleDebug.addEventListener('click', () => {
-    aiDebugPanelEl.classList.toggle('hidden');
-  });
-
-  btnAiSetupHelp.addEventListener('click', () => {
-    chromeFlagsHelpDrawerEl.classList.toggle('hidden');
-  });
-
-  btnCloseFlagsHelp.addEventListener('click', () => {
-    chromeFlagsHelpDrawerEl.classList.add('hidden');
-  });
-
-  btnWebgpuHelp.addEventListener('click', () => {
-    chromeFlagsHelpDrawerEl.classList.toggle('hidden');
-  });
-
+  btnToggleDebug.addEventListener('click', () => aiDebugPanelEl.classList.toggle('hidden'));
+  btnAiSetupHelp.addEventListener('click', () => chromeFlagsHelpDrawerEl.classList.toggle('hidden'));
+  btnCloseFlagsHelp.addEventListener('click', () => chromeFlagsHelpDrawerEl.classList.add('hidden'));
+  btnWebgpuHelp.addEventListener('click', () => chromeFlagsHelpDrawerEl.classList.toggle('hidden'));
   btnClearDebug.addEventListener('click', () => {
     aiDebugLogEl.textContent = 'Waiting for AI activity...';
     aiDebugStreamEl.textContent = '(No tokens generated yet)';
   });
 
-  btnRun.addEventListener('click', () => {
-    consoleOutputEl.textContent = `▶ Running ${workspace.getActiveFileName()}...`;
-    runtime.runCode(editor.getValue());
-  });
+  btnRun.addEventListener('click', () => runActiveGame());
 
   btnStop.addEventListener('click', () => {
     runtime.stop();
-    consoleOutputEl.textContent += '\n⏹ Game stopped.';
+    appendConsole('⏹ Game stopped.');
   });
 
   btnClearConsole.addEventListener('click', () => {
     consoleOutputEl.textContent = '';
-  });
-
-  templateSelect.addEventListener('change', () => {
-    runtime.stop();
-    workspace.loadFromStorageOrTemplate(templateSelect.value);
-    editor.setValue(workspace.getActiveFileContent());
-    renderFileList();
-    runLiveDiagnostics(editor.getValue());
-  });
-
-  btnOpenFolder.addEventListener('click', async () => {
-    const ok = await workspace.openLocalDirectory();
-    if (ok) {
-      editor.setValue(workspace.getActiveFileContent());
-      renderFileList();
-      runLiveDiagnostics(editor.getValue());
-    }
-  });
-
-  btnSaveProject.addEventListener('click', () => {
-    workspace.saveToStorage();
-    consoleOutputEl.textContent += `\n💾 Saved ${workspace.getActiveFileName()} to local workspace.`;
-  });
-
-  btnNewFile.addEventListener('click', () => {
-    const name = prompt('Enter a name for your new Python file:', 'helper.py');
-    if (name && name.trim()) {
-      workspace.createFile(name.trim());
-      editor.setValue(workspace.getActiveFileContent());
-      renderFileList();
-    }
   });
 
   btnExplainSelection.addEventListener('click', () => {
@@ -517,7 +973,6 @@ function bootstrapPywlet(): void {
   btnAskDiagnostic.addEventListener('click', () => {
     const diag = activeBannerDiagnostic || currentDiagnostics[0];
     if (diag) {
-      // Make sure the right Tutor panel is visible if the user was in Focus Mode
       if (workspaceEl.classList.contains('hide-right')) {
         workspaceEl.classList.remove('hide-right');
         updateLayoutToggleButtons();
@@ -537,7 +992,7 @@ function bootstrapPywlet(): void {
     try {
       await tutor.initActiveBackend();
     } catch {
-      // Status bar already updated via progress callback
+      // Status bar already updated
     }
   });
 
@@ -547,15 +1002,6 @@ function bootstrapPywlet(): void {
     if (!q) return;
     tutorInput.value = '';
     await askTutorQuestion(q);
-  });
-
-  document.querySelectorAll('.asset-item').forEach((item) => {
-    item.addEventListener('click', () => {
-      const snippet = item.getAttribute('data-snippet');
-      if (snippet) {
-        editor.insertSnippetAtCursor(snippet);
-      }
-    });
   });
 
   function hexToRgbTuple(hex: string): string {
@@ -580,7 +1026,13 @@ function bootstrapPywlet(): void {
 
     btnInsert?.addEventListener('click', () => {
       const tupleText = tupleEl.textContent || '(56, 189, 248)';
-      switchCenterView('code');
+      if (monacoContainer.classList.contains('hidden') || editor.isReadOnly()) {
+        const runnable = workspace.getRunnablePythonFile();
+        if (runnable) {
+          workspace.setActiveFile(runnable.filename);
+          openActiveFileInEditor(true);
+        }
+      }
       editor.insertSnippetAtCursor(tupleText);
     });
 
@@ -596,7 +1048,7 @@ function bootstrapPywlet(): void {
           }, 1200);
         }
       } catch {
-        // Fallback if clipboard permission denied
+        // Fallback
       }
     });
 
@@ -629,10 +1081,12 @@ function bootstrapPywlet(): void {
     canvasCoordsEl.textContent = `Mouse: (${x}, ${y})`;
   });
 
+  // Initial Startup Sync
   cheatsheetContentEl.innerHTML = CHEATSHEETS.coords;
-  renderFileList();
-  runLiveDiagnostics(editor.getValue());
+  syncSpriteProjectFromWorkspace();
+  updateWorkspaceHeaders();
+  openActiveFileInEditor(true);
   initPwa(document.getElementById('btn-install-pwa'));
 }
 
-bootstrapPywlet();
+void bootstrapPywlet();

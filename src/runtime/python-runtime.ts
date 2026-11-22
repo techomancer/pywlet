@@ -9,6 +9,7 @@ export interface RuntimeCallbacks {
   onStderr: (line: string, friendlyLine?: { line: number; message: string }) => void;
   onStatusChange: (status: 'ready' | 'running' | 'loading') => void;
   getSpriteProjectData?: () => SpriteProjectData;
+  getWorkspaceFile?: (filename: string) => string | null;
 }
 
 /**
@@ -31,6 +32,8 @@ export class PythonPygameRuntime {
   private animFrameId: number | null = null;
   private pressedKeys: Set<string> = new Set();
   private pyodide: any = null;
+  private imageCache: Map<string, { src: string; img: HTMLImageElement }> = new Map();
+  private lastSoundPlayAt: Map<string, number> = new Map();
 
   constructor(canvas: HTMLCanvasElement, callbacks: RuntimeCallbacks) {
     this.canvas = canvas;
@@ -239,6 +242,7 @@ export class PythonPygameRuntime {
       stmt.includes('pygame.time.Clock') ||
       stmt.includes('pygame.key.get_pressed') ||
       stmt.includes('pygame.font.init') ||
+      stmt.includes('pygame.mixer.init') ||
       /^\w+\.tick\s*\(/.test(stmt)
     ) {
       const lhsMatch = stmt.match(/^([a-zA-Z_]\w*)\s*=/);
@@ -383,6 +387,48 @@ export class PythonPygameRuntime {
       return;
     }
 
+    // 6d. Workspace PNG images (`img = pygame.image.load("assets/ship.png")`) & WAV sounds (`snd = pygame.mixer.Sound("assets/boop.wav")`)
+    const imageLoadMatch = stmt.match(
+      /^([a-zA-Z_]\w*)\s*=\s*pygame\.image\.load\s*\(\s*(.+?)\s*\)(?:\.convert(?:_alpha)?\(\))?$/
+    );
+    if (imageLoadMatch) {
+      const [, imgVar, pathExpr] = imageLoadMatch;
+      const assetPath = String(this.evalExpr(pathExpr.trim(), env, lineNum));
+      const dataUrl = this.resolveWorkspaceAsset(assetPath);
+      env[imgVar] = { __type: 'image_surface', path: assetPath, dataUrl };
+      if (dataUrl) this.getOrLoadImage(assetPath, dataUrl);
+      return;
+    }
+
+    const soundLoadMatch = stmt.match(
+      /^([a-zA-Z_]\w*)\s*=\s*pygame\.mixer\.Sound\s*\(\s*(.+?)\s*\)$/
+    );
+    if (soundLoadMatch) {
+      const [, sndVar, pathExpr] = soundLoadMatch;
+      const assetPath = String(this.evalExpr(pathExpr.trim(), env, lineNum));
+      const dataUrl = this.resolveWorkspaceAsset(assetPath);
+      env[sndVar] = { __type: 'sound', path: assetPath, dataUrl };
+      return;
+    }
+
+    const soundPlayCall = stmt.match(/^([a-zA-Z_]\w*)\.play\s*\(\s*\)$/);
+    if (soundPlayCall) {
+      const sndObj = env[soundPlayCall[1]];
+      if (sndObj && sndObj.__type === 'sound') {
+        const freshUrl = this.resolveWorkspaceAsset(sndObj.path) || sndObj.dataUrl;
+        if (freshUrl) this.playWorkspaceWav(sndObj.path, freshUrl);
+      }
+      return;
+    }
+
+    const playSoundHelper = stmt.match(/^play_sound\s*\(\s*(.+?)\s*\)$/);
+    if (playSoundHelper) {
+      const assetPath = String(this.evalExpr(playSoundHelper[1].trim(), env, lineNum));
+      const dataUrl = this.resolveWorkspaceAsset(assetPath);
+      if (dataUrl) this.playWorkspaceWav(assetPath, dataUrl);
+      return;
+    }
+
     const blitMatch = stmt.match(/^\w+\.blit\s*\(\s*([a-zA-Z_]\w*)\s*,\s*\(([^)]+)\)\s*\)$/);
     if (blitMatch) {
       const [, surfVar, posExpr] = blitMatch;
@@ -393,6 +439,16 @@ export class PythonPygameRuntime {
         this.ctx.fillStyle = `rgb(${surfObj.rgb[0]}, ${surfObj.rgb[1]}, ${surfObj.rgb[2]})`;
         this.ctx.textBaseline = 'top';
         this.ctx.fillText(surfObj.text, coords[0] || 0, coords[1] || 0);
+      } else if (surfObj && surfObj.__type === 'image_surface') {
+        const coords = posExpr.split(',').map((s) => Number(this.evalExpr(s.trim(), env, lineNum)));
+        const freshUrl = this.resolveWorkspaceAsset(surfObj.path) || surfObj.dataUrl;
+        if (freshUrl) {
+          const img = this.getOrLoadImage(surfObj.path, freshUrl);
+          if (img && img.complete && img.naturalWidth > 0) {
+            this.ctx.imageSmoothingEnabled = false;
+            this.ctx.drawImage(img, coords[0] || 0, coords[1] || 0);
+          }
+        }
       }
       return;
     }
@@ -580,6 +636,40 @@ export class PythonPygameRuntime {
       if (err?.message?.includes('ZeroDivisionError')) throw err;
     }
     return substituted;
+  }
+
+  private resolveWorkspaceAsset(assetPath: string): string | null {
+    const clean = assetPath.replace(/^\.?\//, '');
+    return (
+      this.callbacks.getWorkspaceFile?.(clean) ||
+      this.callbacks.getWorkspaceFile?.(assetPath) ||
+      null
+    );
+  }
+
+  private getOrLoadImage(key: string, dataUrl: string): HTMLImageElement {
+    const cached = this.imageCache.get(key);
+    if (cached && cached.src === dataUrl) {
+      return cached.img;
+    }
+    const img = new Image();
+    img.src = dataUrl;
+    this.imageCache.set(key, { src: dataUrl, img });
+    return img;
+  }
+
+  private playWorkspaceWav(key: string, dataUrl: string): void {
+    const now = performance.now();
+    const last = this.lastSoundPlayAt.get(key) || 0;
+    if (now - last < 45) return; // Prevent rapid-fire frame spam
+    this.lastSoundPlayAt.set(key, now);
+    try {
+      const audio = new Audio(dataUrl);
+      audio.volume = 0.7;
+      audio.play().catch(() => {});
+    } catch {
+      // Ignore autoplay errors
+    }
   }
 
   private renderProjectSprite(
