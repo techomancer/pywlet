@@ -10,14 +10,20 @@ const TOUR_STORAGE_KEY = 'pywlet_tour_seen_v1';
 const DEFAULT_TOUR_STEPS: TourStep[] = [
   {
     title: '👋 Welcome to Pywlet!',
-    body: 'Pywlet is your own studio to build <strong>Python &amp; Pygame</strong> games right in the browser. Let’s take a super quick tour of the workspace — or click <strong>Skip</strong> anytime!',
+    body: 'Pywlet is your own studio to build <strong>Python &amp; Pygame</strong> games right in the browser — everything autosaves automatically! Let’s take a super quick tour, or click <strong>Skip</strong> anytime.',
     placement: 'center',
   },
   {
-    title: '📁 Workspaces & Project Files',
-    body: 'Switch between saved games, explore read-only <strong>Examples</strong>, or create new <code>.py</code> code, <code>.png</code> pixel art, and <code>.wav</code> sounds here. Click any file to open it!',
+    title: '📁 Playspaces, Files & History',
+    body: 'Switch between your saved <strong>Playspaces</strong>, try read-only <strong>Examples</strong>, or open <strong>History</strong> to save named <strong>Checkpoints</strong> and time-travel back if an experiment goes sideways!',
     selector: '.sidebar',
     placement: 'right',
+  },
+  {
+    title: '🎨 Themes & Button Icons',
+    body: 'Make Pywlet look the way you like! Pick from 9 themes (including Nature, Ocean, Cotton Candy, Lilac Glam, Hacker Green/Amber &amp; Black &amp; White) and toggle button icons On or Off right here.',
+    selector: '.project-controls',
+    placement: 'bottom',
   },
   {
     title: '✏️ Code, Sprite & Sound Editor',
@@ -27,7 +33,7 @@ const DEFAULT_TOUR_STEPS: TourStep[] = [
   },
   {
     title: '▶ Run Game & 🧘 Focus Mode',
-    body: 'Click <strong>▶ Run Game</strong> to play your code live! Feeling crowded? Click <strong>🧘 Focus Mode</strong> (or press <code>Ctrl+B</code>) anytime to slide the side panels out of the way.',
+    body: 'Click <strong>▶ Run Game</strong> to play your code live! Want a calmer screen? Click <strong>🧘 Focus Mode</strong> (or press <code>Ctrl+B</code>) anytime to slide the side panels out of the way.',
     selector: '.run-controls',
     placement: 'bottom',
   },
@@ -38,16 +44,10 @@ const DEFAULT_TOUR_STEPS: TourStep[] = [
     placement: 'left',
   },
   {
-    title: '🦉 Pywlet Socratic AI Tutor',
-    body: 'Stuck on an error or curious what a line does? Highlight any Python word and click <strong>💡 Explain</strong>, or ask a question here — Pywlet gives friendly hints without spoiling the code!',
+    title: '🦉 Pywlet AI Tutor & Console',
+    body: 'Stuck on an error or curious what a line does? Highlight any Python word and click <strong>💡 Explain</strong>, or ask a question here — Pywlet gives hints without spoiling the code. Have fun coding!',
     selector: '.tutor-panel',
     placement: 'left',
-  },
-  {
-    title: '💻 Python Console & Hints',
-    body: 'Your <code>print()</code> output and friendly error clues appear here. You can replay this guide anytime from the <strong>🧭 Guide</strong> button at the top. Have fun coding!',
-    selector: '.console-panel',
-    placement: 'top',
   },
 ];
 

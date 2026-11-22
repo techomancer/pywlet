@@ -16,29 +16,37 @@
       <!-- Top Toolbar -->
       <header class="topbar">
         <div class="brand">
-          <span class="brand-icon">🐍</span>
+          <span class="brand-icon ui-icon" aria-hidden="true">🐍</span>
           <span class="brand-title">Pywlet</span>
-          <span class="brand-badge">Learn Mode</span>
         </div>
 
         <div class="project-controls">
-          <button id="btn-active-workspace-pill" class="btn btn-secondary workspace-pill-btn" title="Switch, clone, or create a workspace">
-            📚 <span id="topbar-workspace-name">My Workspace</span> ▾
+          <label for="theme-select" class="sr-only">Theme</label>
+          <select id="theme-select" class="select-control select-small" title="Choose UI Theme">
+            <option value="dark">Theme: Dark</option>
+            <option value="light">Theme: Light</option>
+            <option value="nature">Theme: Nature</option>
+            <option value="ocean">Theme: Ocean</option>
+            <option value="cotton-candy">Theme: Cotton Candy</option>
+            <option value="lilac-glam">Theme: Lilac Glam</option>
+            <option value="hacker-green">Theme: Hacker Green</option>
+            <option value="hacker-amber">Theme: Hacker Amber</option>
+            <option value="bw">Theme: Black &amp; White</option>
+          </select>
+          <button id="btn-toggle-icons" class="btn btn-small" title="Show or hide decorative icons on buttons">
+            Icons: On
           </button>
-          <button id="btn-save-project" class="btn btn-secondary" title="Save workspace to browser storage (Ctrl+S)">
-            💾 Save
-          </button>
-          <button id="btn-start-tour" class="btn btn-secondary" title="Quick guided tour of the Pywlet workspace">
+          <button id="btn-start-tour" class="btn btn-small" title="Quick guided tour of Pywlet">
             🧭 Guide
           </button>
-          <button id="btn-install-pwa" class="btn btn-secondary hidden" title="Install Pywlet as an offline app">
+          <button id="btn-install-pwa" class="btn btn-small hidden" title="Install Pywlet as an offline app">
             📲 Install App
           </button>
         </div>
 
         <div class="run-controls">
           <div class="layout-toggles" title="Slide side panels in/out or enter Focus Mode">
-            <button id="btn-toggle-left-panel" class="btn btn-small" title="Show/Hide Left Files & Cheatsheets Sidebar">
+            <button id="btn-toggle-left-panel" class="btn btn-small" title="Show/Hide Left Playspace & Cheatsheets Sidebar">
               ◀ Files
             </button>
             <button id="btn-focus-mode" class="btn btn-small" title="Focus Mode: Slide both side panels out of the way (Ctrl+B)">
@@ -60,25 +68,30 @@
 
       <!-- Main 3-Column IDE Workspace -->
       <main class="workspace">
-        <!-- Left Sidebar: Workspace Browser, Workspace Files & Visual Cheatsheets -->
+        <!-- Left Sidebar: Playspace Browser, Playspace Files & Visual Cheatsheets -->
         <aside class="sidebar">
-          <!-- Workspace Header Bar -->
+          <!-- Playspace Header Bar (full untruncated name + switch & history buttons) -->
           <section class="panel-section workspace-header-section">
-            <div class="workspace-switcher-row">
-              <div class="workspace-current-info" title="Active Workspace">
-                <span class="workspace-kicker">WORKSPACE</span>
+            <div class="workspace-switcher-stack">
+              <div class="workspace-current-info" title="Active Playspace (autosaves continuously)">
+                <span class="workspace-kicker">PLAYSPACE</span>
                 <strong id="sidebar-workspace-name" class="workspace-title-text">Loading...</strong>
               </div>
-              <button id="btn-toggle-workspace-browser" class="btn btn-small btn-Ask" title="Browse saved workspaces, clone an example, or create a new empty workspace">
-                📚 Workspaces
-              </button>
+              <div class="playspace-header-actions">
+                <button id="btn-toggle-workspace-browser" class="btn btn-small btn-Ask playspace-switch-btn" title="Switch playspace, explore examples, or create a new empty playspace">
+                  📚 Switch
+                </button>
+                <button id="btn-toggle-checkpoints" class="btn btn-small playspace-history-btn" title="Save working checkpoints &amp; time-travel back to earlier versions (Ctrl+Shift+S)">
+                  🕰️ History
+                </button>
+              </div>
             </div>
           </section>
 
-          <!-- View A: Multi-Workspace Browser (Open, Clone Examples, Create Empty) -->
+          <!-- View A: Multi-Playspace Browser (Open, Clone Examples, Create Empty) -->
           <section id="workspace-browser-panel" class="panel-section workspace-browser-panel hidden">
             <div class="workspace-browser-actions">
-              <button id="btn-new-empty-workspace" class="btn btn-small btn-run" title="Create a brand-new empty Python workspace">
+              <button id="btn-new-empty-workspace" class="btn btn-small btn-run" title="Create a brand-new empty Python playspace">
                 ✨ New Empty
               </button>
               <button id="btn-open-folder" class="btn btn-small" title="Import a local project folder (.py, .png, .wav)">
@@ -87,21 +100,46 @@
             </div>
 
             <div class="section-header" style="margin-top: 10px">
-              <span>💾 SAVED WORKSPACES</span>
+              <span>SAVED PLAYSPACES</span>
               <span id="saved-workspaces-count" class="meta">0</span>
             </div>
             <ul id="saved-workspaces-list" class="workspace-list"></ul>
 
             <div class="section-header" style="margin-top: 12px">
-              <span>🌟 EXAMPLE WORKSPACES</span>
+              <span>EXAMPLE PLAYSPACES</span>
             </div>
             <ul id="example-workspaces-list" class="workspace-list"></ul>
           </section>
 
-          <!-- View B: Open Workspace Files (Python, Sprite Sheets, PNGs, WAVs) -->
+          <!-- View C: Version History / Checkpoints (Kid-friendly snapshots & rollback) -->
+          <section id="workspace-history-panel" class="panel-section workspace-history-panel hidden">
+            <div class="section-header">
+              <span>CHECKPOINTS (TIME TRAVEL)</span>
+              <span id="checkpoints-count" class="meta">0</span>
+            </div>
+            <p class="history-intro">
+              Your work autosaves automatically. Save a <strong>Checkpoint</strong> whenever your game works so you can roll back anytime!
+            </p>
+            <form id="checkpoint-form" class="checkpoint-form">
+              <input
+                id="input-checkpoint-label"
+                type="text"
+                class="checkpoint-input"
+                placeholder="Note (e.g. Working jump!)"
+                maxlength="60"
+                autocomplete="off"
+              />
+              <button type="submit" id="btn-save-checkpoint" class="btn btn-small btn-run">
+                📌 Save Checkpoint
+              </button>
+            </form>
+            <ul id="checkpoints-list" class="checkpoints-list"></ul>
+          </section>
+
+          <!-- View B: Open Playspace Files (Python, Sprite Sheets, PNGs, WAVs) -->
           <section id="workspace-files-panel" class="panel-section workspace-files-panel">
             <div class="section-header">
-              <span>📁 WORKSPACE FILES</span>
+              <span>PLAYSPACE FILES</span>
               <label id="label-import-workspace-file" class="icon-btn" title="Import a .py, .png, or .wav file from your computer">
                 📤 Import
                 <input type="file" id="input-import-workspace-file" accept=".py,.png,.wav,image/png,audio/wav" class="hidden-file-input" />
@@ -113,7 +151,7 @@
               <button id="btn-new-wav" class="icon-btn" title="Create a new WAV sound effect">+ .wav</button>
               <button id="btn-new-sprites-sheet" class="icon-btn" title="Create sprites_data.py Sprite Sheet &amp; Tilemap">+ Sheet</button>
             </div>
-            <button id="btn-clone-example-sidebar" class="btn btn-small btn-Ask hidden" style="width: 100%; margin-bottom: 8px" title="Clone this read-only example into your own editable workspace">
+            <button id="btn-clone-example-sidebar" class="btn btn-small btn-Ask hidden" style="width: 100%; margin-bottom: 8px" title="Clone this read-only example into your own editable playspace">
               📋 Clone Example to Edit
             </button>
             <ul id="file-list" class="file-list"></ul>
@@ -139,7 +177,7 @@
           <div class="editor-statusbar">
             <div class="center-mode-tabs">
               <span id="active-file-pill" class="active-file-pill">
-                <span id="active-file-icon">🐍</span>
+                <span id="active-file-icon" class="ui-icon">🐍</span>
                 <strong id="active-filename">main.py</strong>
               </span>
               <!-- Inner tabs shown ONLY when editing sprites_data.py -->
@@ -155,10 +193,10 @@
             </div>
           </div>
 
-          <!-- Read-Only Example Workspace Banner -->
+          <!-- Read-Only Example Playspace Banner -->
           <div id="readonly-workspace-banner" class="readonly-workspace-banner hidden">
             <div>
-              <strong>📖 Read-Only Example Workspace:</strong>
+              <strong>📖 Read-Only Example Playspace:</strong>
               <span>Explore the code, sprites, sounds, and run the game — or clone it to make your own editable copy!</span>
             </div>
             <button id="btn-clone-active-example" class="btn btn-small btn-run">
@@ -206,10 +244,12 @@
         <section class="stage-tutor-column">
           <!-- Game Stage -->
           <div class="stage-panel" id="stage-panel">
-            <div class="section-header">
-              <span>🎮 GAME STAGE (400 × 280)</span>
-              <div class="stage-header-actions">
+            <div class="section-header stage-header">
+              <div class="stage-title-stack">
+                <span class="stage-title-line">🎮 GAME STAGE (400 × 280)</span>
                 <span id="canvas-coords" class="coord-readout">Mouse: (0, 0)</span>
+              </div>
+              <div class="stage-header-actions">
                 <button id="btn-expand-game" class="icon-btn" title="Expand Game Stage to Full Window Theater Mode (Esc to exit)">
                   🗖 Full Window
                 </button>

@@ -13,6 +13,15 @@ export interface ProjectTemplate {
   createFiles: () => Record<string, string>;
 }
 
+export interface WorkspaceCheckpoint {
+  id: string;
+  label: string;
+  createdAt: number;
+  activeFile: string;
+  files: Record<string, string>;
+  auto?: boolean;
+}
+
 export interface WorkspaceRecord {
   id: string;
   name: string;
@@ -22,6 +31,41 @@ export interface WorkspaceRecord {
   updatedAt: number;
   activeFile: string;
   files: Record<string, string>;
+  checkpoints?: WorkspaceCheckpoint[];
+}
+
+export interface CheckpointDiffSummary {
+  changed: number;
+  added: number;
+  removed: number;
+  identical: boolean;
+}
+
+export function compareFileMaps(
+  snapshotFiles: Record<string, string>,
+  currentFiles: Record<string, string>
+): CheckpointDiffSummary {
+  const allKeys = new Set([...Object.keys(snapshotFiles), ...Object.keys(currentFiles)]);
+  let changed = 0;
+  let added = 0;
+  let removed = 0;
+  for (const key of allKeys) {
+    const inSnap = key in snapshotFiles;
+    const inCurr = key in currentFiles;
+    if (inSnap && !inCurr) {
+      removed++;
+    } else if (!inSnap && inCurr) {
+      added++;
+    } else if (snapshotFiles[key] !== currentFiles[key]) {
+      changed++;
+    }
+  }
+  return {
+    changed,
+    added,
+    removed,
+    identical: changed === 0 && added === 0 && removed === 0,
+  };
 }
 
 export type WorkspaceFileKind = 'python' | 'sprite-sheet' | 'png' | 'wav';
@@ -632,14 +676,24 @@ export class WorkspaceStore {
     }
 
     const now = Date.now();
+    const initialActive = getDefaultActiveFile(files);
     const record: WorkspaceRecord = {
       id: generateWorkspaceId(),
       name: finalName,
       sourceTemplateId: tpl.id,
       createdAt: now,
       updatedAt: now,
-      activeFile: getDefaultActiveFile(files),
+      activeFile: initialActive,
       files,
+      checkpoints: [
+        {
+          id: `cp_${now}_${Math.random().toString(36).slice(2, 6)}`,
+          label: 'Starter version',
+          createdAt: now,
+          activeFile: initialActive,
+          files: { ...files },
+        },
+      ],
     };
 
     this.workspaces.set(record.id, record);
@@ -652,7 +706,7 @@ export class WorkspaceStore {
   public createEmptyWorkspace(name?: string): WorkspaceRecord {
     this.examplePreview = null;
     const existingNames = new Set(Array.from(this.workspaces.values()).map((w) => w.name));
-    const baseName = name?.trim() || 'New Workspace';
+    const baseName = name?.trim() || 'New Playspace';
     let finalName = baseName;
     let counter = 2;
     while (existingNames.has(finalName)) {
@@ -706,6 +760,10 @@ while running:
       updatedAt: now,
       activeFile: orig.activeFile,
       files: { ...orig.files },
+      checkpoints: (orig.checkpoints || []).map((cp) => ({
+        ...cp,
+        files: { ...cp.files },
+      })),
     };
     this.workspaces.set(copy.id, copy);
     this.activeWorkspaceId = copy.id;
@@ -729,7 +787,7 @@ while running:
     this.deleteWorkspaceFromDb(id);
 
     if (this.workspaces.size === 0) {
-      this.createEmptyWorkspace('New Workspace');
+      this.createEmptyWorkspace('New Playspace');
     } else if (this.activeWorkspaceId === id) {
       this.activeWorkspaceId = this.listWorkspaces()[0].id;
       void this.persistActiveId();
@@ -743,6 +801,102 @@ while running:
     ws.updatedAt = Date.now();
     this.persistWorkspace(ws);
     void this.persistActiveId();
+  }
+
+  // ---- Lightweight Version Control / Checkpoints ----
+
+  public listCheckpoints(): WorkspaceCheckpoint[] {
+    if (this.examplePreview) return [];
+    const ws = this.getActiveWorkspace();
+    return [...(ws.checkpoints || [])].sort((a, b) => b.createdAt - a.createdAt);
+  }
+
+  public createCheckpoint(label?: string, auto = false): WorkspaceCheckpoint | null {
+    if (this.examplePreview) return null;
+    const ws = this.getActiveWorkspace();
+    if (!Array.isArray(ws.checkpoints)) {
+      ws.checkpoints = [];
+    }
+    const manualCount = ws.checkpoints.filter((c) => !c.auto).length;
+    const cleanLabel = label?.trim() || (auto ? 'Auto-backup' : `Checkpoint #${manualCount + 1}`);
+    const now = Date.now();
+    const cp: WorkspaceCheckpoint = {
+      id: `cp_${now}_${Math.random().toString(36).slice(2, 7)}`,
+      label: cleanLabel,
+      createdAt: now,
+      activeFile: this.getActiveFileName(),
+      files: { ...ws.files },
+      auto,
+    };
+
+    ws.checkpoints.unshift(cp);
+
+    // Keep storage tidy: retain up to 30 most recent checkpoints
+    const MAX_CHECKPOINTS = 30;
+    if (ws.checkpoints.length > MAX_CHECKPOINTS) {
+      ws.checkpoints = ws.checkpoints
+        .sort((a, b) => b.createdAt - a.createdAt)
+        .slice(0, MAX_CHECKPOINTS);
+    }
+
+    this.saveToStorage();
+    return cp;
+  }
+
+  public restoreCheckpoint(
+    checkpointId: string
+  ): { restored: WorkspaceCheckpoint; backupCreated: boolean } | null {
+    if (this.examplePreview) return null;
+    const ws = this.getActiveWorkspace();
+    const list = ws.checkpoints || [];
+    const target = list.find((c) => c.id === checkpointId);
+    if (!target) return null;
+
+    // Safety net: automatically snapshot current state before overwriting if it differs from every recent checkpoint
+    const newest = [...list].sort((a, b) => b.createdAt - a.createdAt)[0];
+    const differsFromNewest = !newest || !compareFileMaps(newest.files, ws.files).identical;
+    const differsFromTarget = !compareFileMaps(target.files, ws.files).identical;
+    let backupCreated = false;
+    if (differsFromNewest && differsFromTarget) {
+      this.createCheckpoint(`Auto-backup before "${target.label}"`, true);
+      backupCreated = true;
+    }
+
+    ws.files = { ...target.files };
+    ws.activeFile =
+      target.activeFile && target.activeFile in ws.files
+        ? target.activeFile
+        : getDefaultActiveFile(ws.files);
+    this.saveToStorage();
+    return { restored: target, backupCreated };
+  }
+
+  public renameCheckpoint(checkpointId: string, newLabel: string): void {
+    if (this.examplePreview) return;
+    const ws = this.getActiveWorkspace();
+    const cp = (ws.checkpoints || []).find((c) => c.id === checkpointId);
+    const clean = newLabel.trim();
+    if (!cp || !clean) return;
+    cp.label = clean;
+    cp.auto = false;
+    this.saveToStorage();
+  }
+
+  public deleteCheckpoint(checkpointId: string): boolean {
+    if (this.examplePreview) return false;
+    const ws = this.getActiveWorkspace();
+    if (!ws.checkpoints) return false;
+    const prevLen = ws.checkpoints.length;
+    ws.checkpoints = ws.checkpoints.filter((c) => c.id !== checkpointId);
+    if (ws.checkpoints.length !== prevLen) {
+      this.saveToStorage();
+      return true;
+    }
+    return false;
+  }
+
+  public compareCheckpointWithCurrent(checkpoint: WorkspaceCheckpoint): CheckpointDiffSummary {
+    return compareFileMaps(checkpoint.files, this.getFiles());
   }
 
   public getFiles(): Record<string, string> {

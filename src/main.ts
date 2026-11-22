@@ -17,6 +17,7 @@ import { SpriteEditorController } from './sprite-editor/sprite-editor';
 import { WavEditorController } from './audio-editor/wav-editor';
 import { initPwa } from './pwa/register-pwa';
 import { UiTourOverlay } from './ui/tour-overlay';
+import { AppearanceController, type PywletThemeId } from './ui/appearance';
 
 function formatSimpleMarkdown(text: string): string {
   return text
@@ -37,7 +38,7 @@ async function bootstrapPywlet(): Promise<void> {
   let activeBannerDiagnostic: PythonDiagnostic | null = null;
   let lintDebounceTimer: number | null = null;
   let lintRequestCounter = 0;
-  let workspaceBrowserOpen = false;
+  let sidebarMode: 'files' | 'browser' | 'history' = 'files';
   let spriteSheetViewMode: 'visual' | 'code' = 'visual';
   let spriteDataWriteProtected = true;
 
@@ -47,16 +48,22 @@ async function bootstrapPywlet(): Promise<void> {
   const spriteStudioContainer = document.getElementById('sprite-studio-container')!;
   const wavEditorContainer = document.getElementById('wav-editor-container')!;
 
-  const topbarWorkspaceNameEl = document.getElementById('topbar-workspace-name')!;
-  const btnActiveWorkspacePill = document.getElementById('btn-active-workspace-pill')!;
+  const themeSelect = document.getElementById('theme-select') as HTMLSelectElement;
+  const btnToggleIcons = document.getElementById('btn-toggle-icons')!;
   const sidebarWorkspaceNameEl = document.getElementById('sidebar-workspace-name')!;
   const btnToggleWorkspaceBrowser = document.getElementById('btn-toggle-workspace-browser')!;
+  const btnToggleCheckpoints = document.getElementById('btn-toggle-checkpoints')!;
   const workspaceBrowserPanel = document.getElementById('workspace-browser-panel')!;
+  const workspaceHistoryPanel = document.getElementById('workspace-history-panel')!;
   const workspaceFilesPanel = document.getElementById('workspace-files-panel')!;
   const savedWorkspacesListEl = document.getElementById('saved-workspaces-list')!;
   const savedWorkspacesCountEl = document.getElementById('saved-workspaces-count')!;
   const exampleWorkspacesListEl = document.getElementById('example-workspaces-list')!;
   const btnNewEmptyWorkspace = document.getElementById('btn-new-empty-workspace')!;
+  const checkpointForm = document.getElementById('checkpoint-form') as HTMLFormElement;
+  const inputCheckpointLabel = document.getElementById('input-checkpoint-label') as HTMLInputElement;
+  const checkpointsCountEl = document.getElementById('checkpoints-count')!;
+  const checkpointsListEl = document.getElementById('checkpoints-list')!;
 
   const fileListEl = document.getElementById('file-list')!;
   const newFileToolbarEl = document.getElementById('new-file-toolbar')!;
@@ -99,7 +106,6 @@ async function bootstrapPywlet(): Promise<void> {
 
   // Buttons & Controls
   const btnOpenFolder = document.getElementById('btn-open-folder')!;
-  const btnSaveProject = document.getElementById('btn-save-project') as HTMLButtonElement;
   const btnStartTour = document.getElementById('btn-start-tour')!;
   const btnNewPy = document.getElementById('btn-new-py')!;
   const btnNewPng = document.getElementById('btn-new-png')!;
@@ -230,6 +236,9 @@ async function bootstrapPywlet(): Promise<void> {
         return;
       }
       workspace.updateActiveFileContent(updatedCode);
+      if (sidebarMode === 'history') {
+        renderCheckpointsPanel();
+      }
       if (kind === 'python') {
         runLiveDiagnostics(updatedCode);
       } else if (kind === 'sprite-sheet') {
@@ -250,11 +259,13 @@ async function bootstrapPywlet(): Promise<void> {
         editor.setValue(pyCode);
       }
       renderFileList();
+      if (sidebarMode === 'history') renderCheckpointsPanel();
     },
     onReadPythonFile: (filename) => workspace.getFileContent(filename),
     onSavePngFile: (filename, dataUrl) => {
       workspace.setFileContent(filename, dataUrl);
       renderFileList();
+      if (sidebarMode === 'history') renderCheckpointsPanel();
     },
   });
 
@@ -262,6 +273,7 @@ async function bootstrapPywlet(): Promise<void> {
     onSaveWavFile: (filename, dataUrl) => {
       workspace.setFileContent(filename, dataUrl);
       renderFileList();
+      if (sidebarMode === 'history') renderCheckpointsPanel();
     },
   });
 
@@ -410,9 +422,8 @@ async function bootstrapPywlet(): Promise<void> {
     wavEditor.stopPlayback();
     activeFilenameEl.textContent = filename;
 
-    // Sync workspace read-only state across banners and editors
+    // Sync playspace read-only state across banners and editors
     readonlyWorkspaceBannerEl.classList.toggle('hidden', !isWsReadOnly);
-    btnSaveProject.disabled = isWsReadOnly;
     spriteEditor.setReadOnly(isWsReadOnly);
     wavEditor.setReadOnly(isWsReadOnly);
 
@@ -433,7 +444,7 @@ async function bootstrapPywlet(): Promise<void> {
       codeEditorActionsEl.classList.remove('hidden');
       editor.setReadOnly(
         isWsReadOnly,
-        '📖 This is a read-only Example Workspace. Click "📋 Clone to Edit" above to create your own editable copy!'
+        '📖 This is a read-only Example Playspace. Click "📋 Clone to Edit" above to create your own editable copy!'
       );
       editor.setValue(content);
       editor.layout();
@@ -464,7 +475,7 @@ async function bootstrapPywlet(): Promise<void> {
         editor.setReadOnly(
           isWsReadOnly || spriteDataWriteProtected,
           isWsReadOnly
-            ? '📖 This is a read-only Example Workspace. Click "📋 Clone to Edit" above to create your own editable copy!'
+            ? '📖 This is a read-only Example Playspace. Click "📋 Clone to Edit" above to create your own editable copy!'
             : undefined
         );
         editor.setValue(content);
@@ -516,23 +527,141 @@ async function bootstrapPywlet(): Promise<void> {
     updateProtectedBannerUI();
   });
 
-  // 6. Left Sidebar: Workspace Browser & File List Rendering
-  function setWorkspaceBrowserOpen(open: boolean): void {
-    workspaceBrowserOpen = open;
-    workspaceBrowserPanel.classList.toggle('hidden', !open);
-    workspaceFilesPanel.classList.toggle('hidden', open);
-    btnToggleWorkspaceBrowser.textContent = open ? '← Back to Files' : '📚 Workspaces';
-    btnToggleWorkspaceBrowser.classList.toggle('active-toggle', open);
-    if (open) {
+  // 6. Left Sidebar: Playspace Browser, Version History & File List Rendering
+  function formatCheckpointTime(ts: number): string {
+    const diffSec = Math.floor((Date.now() - ts) / 1000);
+    if (diffSec < 45) return 'Just now';
+    if (diffSec < 3600) return `${Math.max(1, Math.floor(diffSec / 60))}m ago`;
+    const d = new Date(ts);
+    const today = new Date();
+    const isToday =
+      d.getFullYear() === today.getFullYear() &&
+      d.getMonth() === today.getMonth() &&
+      d.getDate() === today.getDate();
+    return isToday
+      ? d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+      : d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  }
+
+  function setSidebarMode(mode: 'files' | 'browser' | 'history'): void {
+    const isRo = workspace.isActiveWorkspaceReadOnly();
+    if (mode === 'history' && isRo) {
+      mode = 'files';
+    }
+    sidebarMode = mode;
+
+    workspaceBrowserPanel.classList.toggle('hidden', mode !== 'browser');
+    workspaceHistoryPanel.classList.toggle('hidden', mode !== 'history');
+    workspaceFilesPanel.classList.toggle('hidden', mode !== 'files');
+
+    btnToggleWorkspaceBrowser.textContent =
+      mode === 'browser' ? '← Files' : isRo ? '📚 Switch Playspace' : '📚 Switch';
+    btnToggleWorkspaceBrowser.classList.toggle('active-toggle', mode === 'browser');
+
+    const cpCount = workspace.listCheckpoints().length;
+    btnToggleCheckpoints.classList.toggle('hidden', isRo);
+    btnToggleCheckpoints.textContent =
+      mode === 'history' ? '← Files' : cpCount > 0 ? `🕰️ History (${cpCount})` : '🕰️ History';
+    btnToggleCheckpoints.classList.toggle('active-toggle', mode === 'history');
+
+    if (mode === 'browser') {
       renderWorkspaceBrowser();
+    } else if (mode === 'history') {
+      renderCheckpointsPanel();
     }
   }
 
   function updateWorkspaceHeaders(): void {
     const ws = workspace.getActiveWorkspace();
     const isRo = workspace.isActiveWorkspaceReadOnly();
-    topbarWorkspaceNameEl.textContent = isRo ? `📖 ${ws.name}` : ws.name;
     sidebarWorkspaceNameEl.textContent = isRo ? `📖 ${ws.name}` : ws.name;
+    // Keep Switch / History button labels & count in sync
+    setSidebarMode(isRo && sidebarMode === 'history' ? 'files' : sidebarMode);
+  }
+
+  function renderCheckpointsPanel(): void {
+    const cps = workspace.listCheckpoints();
+    checkpointsCountEl.textContent = String(cps.length);
+    checkpointsListEl.innerHTML = '';
+
+    if (cps.length === 0) {
+      const empty = document.createElement('li');
+      empty.className = 'cp-empty-state';
+      empty.textContent = 'No checkpoints yet. Type a short note above and click "Save Checkpoint" when your game works!';
+      checkpointsListEl.appendChild(empty);
+      return;
+    }
+
+    for (const cp of cps) {
+      const diff = workspace.compareCheckpointWithCurrent(cp);
+      const totalDiffs = diff.changed + diff.added + diff.removed;
+      const fileCount = Object.keys(cp.files).length;
+
+      const li = document.createElement('li');
+      li.className = `cp-card ${diff.identical ? 'is-current' : ''} ${cp.auto ? 'is-auto' : ''}`;
+
+      const diffLabel = diff.identical
+        ? 'Matches current'
+        : `${totalDiffs} file${totalDiffs === 1 ? '' : 's'} differ`;
+
+      li.innerHTML = `
+        <div class="cp-card-top">
+          <div class="cp-card-title">${cp.auto ? '🛡️ ' : '📌 '}<span></span></div>
+          <div class="cp-card-mini-actions">
+            <button class="icon-btn cp-rename-btn" title="Rename checkpoint">✏️</button>
+            <button class="icon-btn cp-del-btn" title="Delete checkpoint">✕</button>
+          </div>
+        </div>
+        <div class="cp-card-meta">
+          <span>${formatCheckpointTime(cp.createdAt)} · ${fileCount} file${fileCount === 1 ? '' : 's'}</span>
+          <span class="cp-diff-pill ${diff.identical ? 'is-match' : ''}">${diffLabel}</span>
+        </div>
+        <div class="cp-card-footer">
+          <button class="btn btn-small btn-Ask cp-restore-btn" ${diff.identical ? 'disabled' : ''}>
+            ${diff.identical ? '✓ Current Version' : '↩ Restore This Version'}
+          </button>
+        </div>
+      `;
+      li.querySelector('.cp-card-title span')!.textContent = cp.label;
+
+      li.querySelector('.cp-restore-btn')!.addEventListener('click', () => {
+        if (diff.identical) return;
+        const ok = confirm(
+          `Restore checkpoint "${cp.label}"?\n\nDon't worry — if you have unsaved changes since your last checkpoint, Pywlet will automatically save a safety backup first so you can undo this!`
+        );
+        if (!ok) return;
+        runtime.stop();
+        const res = workspace.restoreCheckpoint(cp.id);
+        if (res) {
+          syncSpriteProjectFromWorkspace();
+          openActiveFileInEditor(true);
+          updateWorkspaceHeaders();
+          renderCheckpointsPanel();
+          appendConsole(
+            `🕰️ Restored checkpoint "${res.restored.label}"${
+              res.backupCreated ? ' (saved an automatic safety backup of your previous code first!)' : ''
+            }.`
+          );
+        }
+      });
+
+      li.querySelector('.cp-rename-btn')!.addEventListener('click', () => {
+        const next = prompt('Rename checkpoint:', cp.label);
+        if (next && next.trim()) {
+          workspace.renameCheckpoint(cp.id, next.trim());
+          renderCheckpointsPanel();
+        }
+      });
+
+      li.querySelector('.cp-del-btn')!.addEventListener('click', () => {
+        if (!confirm(`Delete checkpoint "${cp.label}"?`)) return;
+        workspace.deleteCheckpoint(cp.id);
+        updateWorkspaceHeaders();
+        renderCheckpointsPanel();
+      });
+
+      checkpointsListEl.appendChild(li);
+    }
   }
 
   function renderWorkspaceBrowser(): void {
@@ -553,9 +682,9 @@ async function bootstrapPywlet(): Promise<void> {
           <div class="ws-card-meta">${fileCount} file${fileCount === 1 ? '' : 's'} · ${dateLabel}</div>
         </div>
         <div class="ws-card-actions">
-          <button class="icon-btn ws-rename-btn" title="Rename workspace">✏️</button>
-          <button class="icon-btn ws-dup-btn" title="Duplicate workspace">📋</button>
-          <button class="icon-btn ws-del-btn" title="Delete workspace">🗑</button>
+          <button class="icon-btn ws-rename-btn" title="Rename playspace">✏️</button>
+          <button class="icon-btn ws-dup-btn" title="Duplicate playspace">📋</button>
+          <button class="icon-btn ws-del-btn" title="Delete playspace">🗑</button>
         </div>
       `;
       li.querySelector('.ws-card-title span')!.textContent = ws.name;
@@ -564,14 +693,14 @@ async function bootstrapPywlet(): Promise<void> {
         runtime.stop();
         workspace.openWorkspace(ws.id);
         syncSpriteProjectFromWorkspace();
+        setSidebarMode('files');
         updateWorkspaceHeaders();
-        setWorkspaceBrowserOpen(false);
         openActiveFileInEditor(true);
       });
 
       li.querySelector('.ws-rename-btn')!.addEventListener('click', (e) => {
         e.stopPropagation();
-        const nextName = prompt('Rename workspace:', ws.name);
+        const nextName = prompt('Rename playspace:', ws.name);
         if (nextName && nextName.trim()) {
           workspace.renameWorkspace(ws.id, nextName.trim());
           updateWorkspaceHeaders();
@@ -584,14 +713,14 @@ async function bootstrapPywlet(): Promise<void> {
         runtime.stop();
         workspace.duplicateWorkspace(ws.id);
         syncSpriteProjectFromWorkspace();
+        setSidebarMode('files');
         updateWorkspaceHeaders();
-        setWorkspaceBrowserOpen(false);
         openActiveFileInEditor(true);
       });
 
       li.querySelector('.ws-del-btn')!.addEventListener('click', (e) => {
         e.stopPropagation();
-        if (!confirm(`Delete workspace "${ws.name}" from browser storage?`)) return;
+        if (!confirm(`Delete playspace "${ws.name}" from browser storage?`)) return;
         runtime.stop();
         workspace.deleteWorkspace(ws.id);
         syncSpriteProjectFromWorkspace();
@@ -603,7 +732,7 @@ async function bootstrapPywlet(): Promise<void> {
       savedWorkspacesListEl.appendChild(li);
     }
 
-    // Example workspaces (click card to preview read-only, click Clone to clone & switch)
+    // Example playspaces (click card to preview read-only, click Clone to clone & switch)
     exampleWorkspacesListEl.innerHTML = '';
     const activeExampleId = workspace.getActiveExampleTemplateId();
     for (const tpl of Object.values(STARTER_TEMPLATES)) {
@@ -614,7 +743,7 @@ async function bootstrapPywlet(): Promise<void> {
           <div class="ws-card-title">${tpl.icon} <span></span></div>
           <div class="ws-card-meta"></div>
         </div>
-        <button class="btn btn-small btn-Ask ws-clone-btn" title="Clone this example into your saved workspaces and switch to it">Clone</button>
+        <button class="btn btn-small btn-Ask ws-clone-btn" title="Clone this example into your saved playspaces and switch to it">Clone</button>
       `;
       li.querySelector('.ws-card-title span')!.textContent = tpl.name;
       li.querySelector('.ws-card-meta')!.textContent = tpl.description;
@@ -623,8 +752,8 @@ async function bootstrapPywlet(): Promise<void> {
         runtime.stop();
         workspace.openExampleWorkspaceReadOnly(tpl.id);
         syncSpriteProjectFromWorkspace();
+        setSidebarMode('files');
         updateWorkspaceHeaders();
-        setWorkspaceBrowserOpen(false);
         openActiveFileInEditor(true);
         appendConsole(`📖 Opened example "${tpl.name}" in read-only mode. Click "Clone to Edit" to make your own copy!`);
       });
@@ -634,8 +763,8 @@ async function bootstrapPywlet(): Promise<void> {
         runtime.stop();
         const created = workspace.cloneExampleWorkspace(tpl.id);
         syncSpriteProjectFromWorkspace();
+        setSidebarMode('files');
         updateWorkspaceHeaders();
-        setWorkspaceBrowserOpen(false);
         openActiveFileInEditor(true);
         appendConsole(`🌟 Cloned example "${tpl.name}" as "${created.name}".`);
       });
@@ -678,6 +807,7 @@ async function bootstrapPywlet(): Promise<void> {
         leftWrap.appendChild(thumb);
       } else {
         const iconSpan = document.createElement('span');
+        iconSpan.className = 'ui-icon';
         iconSpan.textContent =
           kind === 'sprite-sheet' ? '🎨' : kind === 'wav' ? '🔊' : kind === 'png' ? '🖼️' : '🐍';
         leftWrap.appendChild(iconSpan);
@@ -715,7 +845,7 @@ async function bootstrapPywlet(): Promise<void> {
         delBtn.title = `Delete ${filename}`;
         delBtn.addEventListener('click', (e) => {
           e.stopPropagation();
-          if (!confirm(`Delete "${filename}" from this workspace?`)) return;
+          if (!confirm(`Delete "${filename}" from this playspace?`)) return;
           workspace.deleteFile(filename);
           openActiveFileInEditor(true);
         });
@@ -792,7 +922,7 @@ async function bootstrapPywlet(): Promise<void> {
   function runActiveGame(): void {
     const runnable = workspace.getRunnablePythonFile();
     if (!runnable) {
-      appendConsole('❌ No runnable Python file found in this workspace.');
+      appendConsole('❌ No runnable Python file found in this playspace.');
       return;
     }
     syncSpriteProjectFromWorkspace();
@@ -838,26 +968,36 @@ async function bootstrapPywlet(): Promise<void> {
   });
 
   btnToggleWorkspaceBrowser.addEventListener('click', () => {
-    setWorkspaceBrowserOpen(!workspaceBrowserOpen);
+    setSidebarMode(sidebarMode === 'browser' ? 'files' : 'browser');
   });
 
-  btnActiveWorkspacePill.addEventListener('click', () => {
-    if (workspaceEl.classList.contains('hide-left')) {
-      workspaceEl.classList.remove('hide-left');
-      updateLayoutToggleButtons();
+  btnToggleCheckpoints.addEventListener('click', () => {
+    setSidebarMode(sidebarMode === 'history' ? 'files' : 'history');
+    if (sidebarMode === 'history') {
+      inputCheckpointLabel.focus();
     }
-    setWorkspaceBrowserOpen(!workspaceBrowserOpen);
+  });
+
+  checkpointForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const label = inputCheckpointLabel.value.trim();
+    const cp = workspace.createCheckpoint(label || undefined);
+    if (!cp) return;
+    inputCheckpointLabel.value = '';
+    updateWorkspaceHeaders();
+    renderCheckpointsPanel();
+    appendConsole(`📌 Saved checkpoint "${cp.label}".`);
   });
 
   btnNewEmptyWorkspace.addEventListener('click', () => {
-    const name = prompt('Name your new empty workspace:', 'My Cool Game');
+    const name = prompt('Name your new empty playspace:', 'My Cool Game');
     if (!name || !name.trim()) return;
     runtime.stop();
     workspace.createEmptyWorkspace(name.trim());
+    setSidebarMode('files');
     updateWorkspaceHeaders();
-    setWorkspaceBrowserOpen(false);
     openActiveFileInEditor(true);
-    appendConsole(`✨ Created empty workspace "${name.trim()}".`);
+    appendConsole(`✨ Created empty playspace "${name.trim()}".`);
   });
 
   btnOpenFolder.addEventListener('click', async () => {
@@ -865,8 +1005,8 @@ async function bootstrapPywlet(): Promise<void> {
     if (ok) {
       runtime.stop();
       syncSpriteProjectFromWorkspace();
+      setSidebarMode('files');
       updateWorkspaceHeaders();
-      setWorkspaceBrowserOpen(false);
       openActiveFileInEditor(true);
     }
   });
@@ -878,20 +1018,11 @@ async function bootstrapPywlet(): Promise<void> {
     syncSpriteProjectFromWorkspace();
     updateWorkspaceHeaders();
     openActiveFileInEditor(true);
-    appendConsole(`🌟 Cloned example into editable workspace "${created.name}".`);
+    appendConsole(`🌟 Cloned example into editable playspace "${created.name}".`);
   }
 
   btnCloneActiveExample.addEventListener('click', handleCloneActiveExample);
   btnCloneExampleSidebar.addEventListener('click', handleCloneActiveExample);
-
-  btnSaveProject.addEventListener('click', () => {
-    if (workspace.isActiveWorkspaceReadOnly()) {
-      handleCloneActiveExample();
-      return;
-    }
-    workspace.saveToStorage();
-    appendConsole(`💾 Saved workspace "${workspace.getActiveWorkspace().name}" to browser storage.`);
-  });
 
   btnNewPy.addEventListener('click', () => {
     const name = prompt('New Python file name:', 'helper.py');
@@ -945,7 +1076,7 @@ async function bootstrapPywlet(): Promise<void> {
       }
       syncSpriteProjectFromWorkspace();
       openActiveFileInEditor(true);
-      appendConsole(`📤 Imported ${file.name} into workspace.`);
+      appendConsole(`📤 Imported ${file.name} into playspace.`);
     } catch (err: any) {
       appendConsole(`❌ Failed to import ${file.name}: ${err?.message || err}`);
     }
@@ -1010,10 +1141,19 @@ async function bootstrapPywlet(): Promise<void> {
       e.preventDefault();
       btnFocusMode.click();
     }
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 's') {
+      e.preventDefault();
+      if (!workspace.isActiveWorkspaceReadOnly()) {
+        workspaceEl.classList.remove('hide-left');
+        updateLayoutToggleButtons();
+        setSidebarMode('history');
+        inputCheckpointLabel.focus();
+      }
+      return;
+    }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
       e.preventDefault();
       workspace.saveToStorage();
-      appendConsole(`💾 Saved workspace "${workspace.getActiveWorkspace().name}".`);
     }
   });
 
@@ -1239,6 +1379,26 @@ async function bootstrapPywlet(): Promise<void> {
     canvasCoordsEl.textContent = `Mouse: (${x}, ${y})`;
   });
 
+  // Theme & Optional Button Icons
+  const appearance = new AppearanceController((monacoTheme) => {
+    editor.setTheme(monacoTheme);
+  });
+  themeSelect.value = appearance.getTheme();
+  const syncIconsButtonLabel = () => {
+    const on = appearance.getShowIcons();
+    btnToggleIcons.textContent = on ? 'Icons: On' : 'Icons: Off';
+    btnToggleIcons.classList.toggle('active-toggle', !on);
+  };
+  syncIconsButtonLabel();
+
+  themeSelect.addEventListener('change', () => {
+    appearance.applyTheme(themeSelect.value as PywletThemeId);
+  });
+  btnToggleIcons.addEventListener('click', () => {
+    appearance.applyShowIcons(!appearance.getShowIcons());
+    syncIconsButtonLabel();
+  });
+
   // Initial Startup Sync
   cheatsheetContentEl.innerHTML = CHEATSHEETS.coords;
   syncSpriteProjectFromWorkspace();
@@ -1252,7 +1412,7 @@ async function bootstrapPywlet(): Promise<void> {
     // Ensure both sidebars are visible during the walkthrough
     workspaceEl.classList.remove('hide-left', 'hide-right');
     updateLayoutToggleButtons();
-    setWorkspaceBrowserOpen(false);
+    setSidebarMode('files');
   });
   btnStartTour.addEventListener('click', () => uiTour.start());
   uiTour.startIfFirstVisit();

@@ -96,6 +96,10 @@ export class CodeEditorController {
     this.editor.layout();
   }
 
+  setTheme(themeName: string): void {
+    monaco.editor.setTheme(themeName);
+  }
+
   getCursorContext(): EditorCursorContext {
     const pos = this.editor.getPosition() || new monaco.Position(1, 1);
     const selection = this.editor.getSelection();
