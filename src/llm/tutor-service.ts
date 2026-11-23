@@ -67,6 +67,10 @@ export class TutorService {
     this.ollamaBackend.setBaseUrl(url);
   }
 
+  setLocalServerApiKey(key: string): void {
+    this.ollamaBackend.setApiKey(key);
+  }
+
   getLocalServerUrl(): string {
     return this.ollamaBackend.getBaseUrl();
   }

@@ -125,6 +125,7 @@ async function bootstrapPywlet(): Promise<void> {
   const llmBackendSelect = document.getElementById('llm-backend-select') as HTMLSelectElement;
   const localServerConfigRow = document.getElementById('local-server-config-row')!;
   const inputLocalServerUrl = document.getElementById('input-local-server-url') as HTMLInputElement;
+  const inputLocalServerKey = document.getElementById('input-local-server-key') as HTMLInputElement;
   const btnLoadModel = document.getElementById('btn-load-model')!;
   const llmStatusTextEl = document.getElementById('llm-status-text')!;
   const tutorMessagesEl = document.getElementById('tutor-messages')!;
@@ -1213,9 +1214,27 @@ async function bootstrapPywlet(): Promise<void> {
 
   const AI_BACKEND_STORAGE_KEY = 'pywlet_ai_backend_v1';
   const LOCAL_SERVER_URL_KEY = 'pywlet_local_server_url_v1';
+  const LOCAL_SERVER_KEY_KEY = 'pywlet_local_server_key_v1';
 
   const syncLocalServerRowVisibility = () => {
     localServerConfigRow.classList.toggle('hidden', llmBackendSelect.value !== 'ollama-local');
+  };
+
+  const applyLocalServerConfigFromInputs = () => {
+    const url = inputLocalServerUrl.value.trim() || 'http://localhost:11434';
+    const apiKey = inputLocalServerKey.value.trim();
+    tutor.setLocalServerUrl(url);
+    tutor.setLocalServerApiKey(apiKey);
+    try {
+      localStorage.setItem(LOCAL_SERVER_URL_KEY, url);
+      if (apiKey) {
+        localStorage.setItem(LOCAL_SERVER_KEY_KEY, apiKey);
+      } else {
+        localStorage.removeItem(LOCAL_SERVER_KEY_KEY);
+      }
+    } catch {
+      // Ignore
+    }
   };
 
   try {
@@ -1224,19 +1243,19 @@ async function bootstrapPywlet(): Promise<void> {
       inputLocalServerUrl.value = savedUrl;
       tutor.setLocalServerUrl(savedUrl);
     }
+    const savedKey = localStorage.getItem(LOCAL_SERVER_KEY_KEY);
+    if (savedKey) {
+      inputLocalServerKey.value = savedKey;
+      tutor.setLocalServerApiKey(savedKey);
+    }
   } catch {
     // Ignore
   }
 
-  inputLocalServerUrl.addEventListener('change', () => {
-    const url = inputLocalServerUrl.value.trim() || 'http://localhost:11434';
-    tutor.setLocalServerUrl(url);
-    try {
-      localStorage.setItem(LOCAL_SERVER_URL_KEY, url);
-    } catch {
-      // Ignore
-    }
-  });
+  inputLocalServerUrl.addEventListener('input', applyLocalServerConfigFromInputs);
+  inputLocalServerUrl.addEventListener('change', applyLocalServerConfigFromInputs);
+  inputLocalServerKey.addEventListener('input', applyLocalServerConfigFromInputs);
+  inputLocalServerKey.addEventListener('change', applyLocalServerConfigFromInputs);
 
   llmBackendSelect.addEventListener('change', async () => {
     const id = llmBackendSelect.value as LLMBackendId;
@@ -1279,16 +1298,16 @@ async function bootstrapPywlet(): Promise<void> {
 
   btnLoadModel.addEventListener('click', async () => {
     if (llmBackendSelect.value === 'ollama-local') {
-      const url = inputLocalServerUrl.value.trim() || 'http://localhost:11434';
-      tutor.setLocalServerUrl(url);
-      try {
-        localStorage.setItem(LOCAL_SERVER_URL_KEY, url);
-      } catch {
-        // Ignore
-      }
+      applyLocalServerConfigFromInputs();
     }
     try {
       await tutor.initActiveBackend();
+      if (llmBackendSelect.value === 'ollama-local') {
+        const discovered = tutor.getLocalServerUrl();
+        if (discovered && discovered !== inputLocalServerUrl.value.trim()) {
+          inputLocalServerUrl.value = discovered;
+        }
+      }
     } catch {
       // Status bar already updated
     }

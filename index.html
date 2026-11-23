@@ -294,7 +294,7 @@
                 <select id="llm-backend-select" class="select-control select-small" title="Choose Local AI Backend">
                   <option value="transformers-js">Transformers.js (Qwen 1.5B Local)</option>
                   <option value="chrome-prompt">Chrome Prompt API (Gemma 4 / Nano)</option>
-                  <option value="ollama-local">Local Server (Ollama / llama.cpp)</option>
+                  <option value="ollama-local">Local Server (Ollama / llama.cpp / Strata)</option>
                 </select>
                 <button id="btn-load-model" class="btn btn-small btn-Ask" title="Initialize or warm up local AI model">
                   ⚡ Load AI
@@ -307,7 +307,7 @@
                 </button>
               </div>
 
-              <!-- Local Server URL (shown when Ollama / llama.cpp backend is selected) -->
+              <!-- Local Server URL (shown when Ollama / llama.cpp / Strata backend is selected) -->
               <div id="local-server-config-row" class="ai-setup-top-row hidden">
                 <label for="input-local-server-url" class="wav-group-label">Server URL:</label>
                 <input
@@ -315,8 +315,16 @@
                   type="url"
                   class="select-control select-small"
                   value="http://localhost:11434"
-                  placeholder="http://localhost:11434"
-                  title="Base URL of your llama-server, Ollama, or OpenAI-compatible server"
+                  placeholder="http://localhost:8080/v1 or :11434"
+                  title="Base URL of your Strata, llama-server, Ollama, or OpenAI-compatible server"
+                />
+                <input
+                  id="input-local-server-key"
+                  type="password"
+                  class="select-control select-small"
+                  placeholder="API key (optional)"
+                  title="Optional Bearer API key (leave blank if your local server does not require one)"
+                  style="max-width: 120px"
                 />
               </div>
 

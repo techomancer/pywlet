@@ -26,20 +26,25 @@ function stripThinkingTags(text: string): string {
   return closed.trimStart();
 }
 
+const DEFAULT_LOCAL_URL = 'http://localhost:11434';
+const AUTO_DISCOVERY_URLS = ['http://localhost:11434', 'http://localhost:8080', 'http://localhost:1234'];
+
 /**
  * Pluggable adapter for any OpenAI-compatible local server:
- * llama.cpp (`llama-server`), Ollama, LM Studio, vLLM, etc.
+ * llama.cpp (`llama-server`), Strata, Ollama, LM Studio, vLLM, etc.
  */
 export class OllamaLocalBackend implements LLMBackend {
   readonly id = 'ollama-local' as const;
-  readonly displayName = 'Local Server (Ollama / llama.cpp)';
+  readonly displayName = 'Local Server (Ollama / llama.cpp / Strata)';
 
   private baseUrl: string;
+  private apiKey = '';
   private model: string;
   private serverKind = 'Local Server';
   private ready = false;
+  private customUrlExplicit = false;
 
-  constructor(baseUrl = 'http://localhost:11434', model = '') {
+  constructor(baseUrl = DEFAULT_LOCAL_URL, model = '') {
     this.baseUrl = normalizeServerBaseUrl(baseUrl);
     this.model = model;
   }
@@ -48,8 +53,9 @@ export class OllamaLocalBackend implements LLMBackend {
     return this.baseUrl;
   }
 
-  setBaseUrl(rawUrl: string): void {
+  setBaseUrl(rawUrl: string, explicit = true): void {
     const next = normalizeServerBaseUrl(rawUrl);
+    this.customUrlExplicit = explicit && next !== DEFAULT_LOCAL_URL;
     if (next !== this.baseUrl) {
       this.baseUrl = next;
       this.model = '';
@@ -57,44 +63,127 @@ export class OllamaLocalBackend implements LLMBackend {
     }
   }
 
+  setApiKey(key: string): void {
+    const clean = key.trim();
+    if (clean !== this.apiKey) {
+      this.apiKey = clean;
+      this.ready = false;
+    }
+  }
+
+  private authHeaders(extra: Record<string, string> = {}): Record<string, string> {
+    if (!this.apiKey) return extra;
+    return { ...extra, Authorization: `Bearer ${this.apiKey}` };
+  }
+
   isReady(): boolean {
     return this.ready;
+  }
+
+  private async probeSingleBaseUrl(
+    baseUrl: string,
+    onDebug?: (event: LLMDebugEvent) => void
+  ): Promise<{ ok: boolean; model?: string; serverKind?: string; statusNote?: string }> {
+    let lastNote = '';
+
+    // 1. Try OpenAI-compatible /v1/models first (Strata, llama-server, Ollama, LM Studio, vLLM)
+    try {
+      const res = await fetch(`${baseUrl}/v1/models`, {
+        headers: this.authHeaders(),
+      });
+      if (res.ok) {
+        const json = await res.json();
+        const models: Array<{ id?: string; name?: string }> = Array.isArray(json?.data)
+          ? json.data
+          : Array.isArray(json?.models)
+          ? json.models
+          : [];
+        const detected = models[0]?.id || models[0]?.name || '';
+        return {
+          ok: true,
+          model: detected || this.model || 'local-model',
+          serverKind: 'OpenAI-Compatible Server',
+        };
+      }
+      lastNote = `/v1/models -> HTTP ${res.status}`;
+      onDebug?.({
+        timestamp: nowTime(),
+        stage: 'model-load',
+        detail: `Probe ${baseUrl}/v1/models returned HTTP ${res.status}`,
+      });
+    } catch (err: any) {
+      lastNote = `/v1/models -> ${err?.message || 'network/CORS error'}`;
+      onDebug?.({
+        timestamp: nowTime(),
+        stage: 'model-load',
+        detail: `Probe ${baseUrl}/v1/models failed: ${err?.message || err}`,
+      });
+    }
+
+    // 2. Try Ollama native /api/tags
+    try {
+      const res = await fetch(`${baseUrl}/api/tags`, {
+        headers: this.authHeaders(),
+      });
+      if (res.ok) {
+        const json = await res.json();
+        const firstModel = json?.models?.[0]?.name || 'qwen2.5-coder:1.5b';
+        return {
+          ok: true,
+          model: this.model || firstModel,
+          serverKind: 'Ollama',
+        };
+      }
+    } catch {
+      // Fall through to /health
+    }
+
+    // 3. Try /health (llama.cpp / Strata)
+    try {
+      const res = await fetch(`${baseUrl}/health`, {
+        headers: this.authHeaders(),
+      });
+      if (res.ok) {
+        return {
+          ok: true,
+          model: this.model || 'local-model',
+          serverKind: 'Local HTTP Server',
+        };
+      }
+    } catch {
+      // Fall through
+    }
+
+    return { ok: false, statusNote: lastNote };
   }
 
   async init(
     onProgress?: (event: LLMProgressEvent) => void,
     onDebug?: (event: LLMDebugEvent) => void
   ): Promise<void> {
-    onProgress?.({
-      status: 'loading',
-      message: `Connecting to ${this.baseUrl}...`,
-    });
+    const candidates = this.customUrlExplicit
+      ? [this.baseUrl]
+      : [this.baseUrl, ...AUTO_DISCOVERY_URLS.filter((u) => u !== this.baseUrl)];
 
-    // 1. Try OpenAI-compatible /v1/models first (works on llama-server, Ollama, LM Studio, vLLM)
-    try {
-      const res = await fetch(`${this.baseUrl}/v1/models`);
-      if (res.ok) {
-        const json = await res.json();
-        const models: Array<{ id?: string }> = Array.isArray(json?.data)
-          ? json.data
-          : Array.isArray(json?.models)
-          ? json.models
-          : [];
-        const detected = models[0]?.id || (models[0] as any)?.name || '';
-        if (detected) {
-          this.model = detected;
-        } else if (!this.model) {
-          this.model = 'local-model';
-        }
-        this.serverKind = 'llama.cpp / OpenAI Server';
+    let lastStatusNote = '';
+    for (const candidate of candidates) {
+      onProgress?.({
+        status: 'loading',
+        message: `Connecting to ${candidate}...`,
+      });
+      const result = await this.probeSingleBaseUrl(candidate, onDebug);
+      if (result.ok) {
+        this.baseUrl = candidate;
+        this.model = result.model || 'local-model';
+        this.serverKind = result.serverKind || 'Local Server';
         this.ready = true;
         onDebug?.({
           timestamp: nowTime(),
           stage: 'model-load',
-          detail: `Connected to ${this.baseUrl}/v1/models — active model: ${this.model}`,
+          detail: `Connected to ${this.baseUrl} — active model: ${this.model}`,
           data: {
             device: 'local-http',
-            adapterInfo: `Local HTTP (${this.model})`,
+            adapterInfo: `${this.serverKind} (${this.model})`,
           },
         });
         onProgress?.({
@@ -103,56 +192,25 @@ export class OllamaLocalBackend implements LLMBackend {
         });
         return;
       }
-    } catch {
-      // Fall through to /health and /api/tags probes
-    }
-
-    // 2. Try Ollama native /api/tags
-    try {
-      const res = await fetch(`${this.baseUrl}/api/tags`);
-      if (res.ok) {
-        const json = await res.json();
-        const firstModel = json?.models?.[0]?.name || 'qwen2.5-coder:1.5b';
-        this.model = this.model || firstModel;
-        this.serverKind = 'Ollama';
-        this.ready = true;
-        onDebug?.({
-          timestamp: nowTime(),
-          stage: 'model-load',
-          detail: `Connected to Ollama at ${this.baseUrl} — model: ${this.model}`,
-          data: {
-            device: 'local-http',
-            adapterInfo: `Ollama (${this.model})`,
-          },
-        });
-        onProgress?.({
-          status: 'ready',
-          message: `Connected to Ollama (${this.model})`,
-        });
-        return;
+      if (candidate === this.baseUrl && result.statusNote) {
+        lastStatusNote = result.statusNote;
       }
-    } catch {
-      // Fall through to /health
     }
 
-    // 3. Try llama.cpp /health
+    // Check if the configured server is actually reachable without CORS (gives a much clearer hint)
+    let likelyCorsBlock = false;
     try {
-      const res = await fetch(`${this.baseUrl}/health`);
-      if (res.ok) {
-        this.model = this.model || 'local-model';
-        this.serverKind = 'llama.cpp';
-        this.ready = true;
-        onProgress?.({
-          status: 'ready',
-          message: `Connected to ${this.serverKind} @ ${this.baseUrl}`,
-        });
-        return;
-      }
+      await fetch(`${this.baseUrl}/health`, { mode: 'no-cors' });
+      likelyCorsBlock = true;
     } catch {
-      // All probes failed
+      // Could still be CORS under COEP, or server not running
     }
 
-    const msg = `Could not reach local server at ${this.baseUrl} (tried /v1/models, /api/tags, /health). Check the URL in ⚙️ AI Setup and ensure CORS is enabled.`;
+    const origin = typeof window !== 'undefined' ? window.location.origin : 'this page';
+    const msg = likelyCorsBlock
+      ? `Server is running at ${this.baseUrl}, but it blocked browser CORS from ${origin}! Allow "${origin}" in your server's CORS settings (e.g. "cors_origins": ["${origin}"] in Strata, or OLLAMA_ORIGINS=* in Ollama).`
+      : `Could not reach local server at ${this.baseUrl} (${lastStatusNote || 'blocked or unreachable'}). Check the Server URL (e.g. http://localhost:8080/v1 for Strata/llama.cpp, :11434 for Ollama) and allow CORS for "${origin}" (in Strata: add "${origin}" to cors_origins).`;
+
     onProgress?.({ status: 'error', message: msg });
     onDebug?.({ timestamp: nowTime(), stage: 'error', detail: msg });
     throw new Error(msg);
@@ -183,21 +241,43 @@ export class OllamaLocalBackend implements LLMBackend {
       },
     });
 
-    const response = await fetch(endpoint, {
+    const basePayload = {
+      model: this.model || 'local-model',
+      messages,
+      temperature: 0.35,
+      max_tokens: 1024,
+      stream: true,
+    };
+
+    const headers = this.authHeaders({ 'Content-Type': 'application/json' });
+
+    let response = await fetch(endpoint, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify({
-        model: this.model || 'local-model',
-        messages,
-        temperature: 0.35,
-        max_tokens: 1024,
-        stream: true,
+        ...basePayload,
         // Gently disable long chain-of-thought on Qwen3/3.8 llama-server when supported
         reasoning_format: 'deepseek',
         chat_template_kwargs: { enable_thinking: false },
       }),
       signal,
     });
+
+    // Some strict OpenAI-compatible servers (e.g. Strata, vLLM proxies) reject extra fields with 400/422.
+    // Automatically retry with a pure standard OpenAI payload.
+    if (response.status === 400 || response.status === 422) {
+      onDebug?.({
+        timestamp: nowTime(),
+        stage: 'model-load',
+        detail: `Server returned HTTP ${response.status} on extended options; retrying with standard OpenAI payload...`,
+      });
+      response = await fetch(endpoint, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(basePayload),
+        signal,
+      });
+    }
 
     if (!response.ok) {
       const errBody = await response.text().catch(() => '');
