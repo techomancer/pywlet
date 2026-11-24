@@ -1,4 +1,20 @@
 import { PYWLET_PYTHON_BOOTSTRAP } from './pyodide-bridge-script';
+import {
+  DEBUG_BP_BYTE_OFFSET,
+  DEBUG_BP_MAX_BYTES,
+  DEBUG_CMD_IDLE,
+  DEBUG_CMD_PAUSE,
+  DEBUG_CMD_STOP,
+  DEBUG_EVAL_BYTE_OFFSET,
+  DEBUG_EVAL_MAX_BYTES,
+  DEBUG_SLOT_BP_COUNT,
+  DEBUG_SLOT_BP_JSON_LEN,
+  DEBUG_SLOT_BP_VERSION,
+  DEBUG_SLOT_CMD,
+  DEBUG_SLOT_EVAL_LEN,
+  DEBUG_SLOT_FRAME_IDX,
+  DEBUG_SLOT_SEQ,
+} from './debug-types';
 
 interface PyodideInstance {
   runPython: (code: string) => any;
@@ -16,6 +32,20 @@ let initPromise: Promise<void> | null = null;
 let interruptBuf: Int32Array | null = null;
 let inputBuf: Int32Array | null = null;
 let waitBuf: Int32Array | null = null;
+let debugInt32: Int32Array | null = null;
+let debugBytes: Uint8Array | null = null;
+let lastDebugSeq = 0;
+
+const utf8Decoder = new TextDecoder();
+
+function readDebugUtf8(offset: number, length: number, maxLen: number): string {
+  if (!debugBytes || length <= 0) return '';
+  const safeLen = Math.min(length, maxLen);
+  // Copy out of SharedArrayBuffer before TextDecoder.decode (spec disallows direct SAB views)
+  const copy = new Uint8Array(safeLen);
+  copy.set(debugBytes.subarray(offset, offset + safeLen));
+  return utf8Decoder.decode(copy);
+}
 
 // Fallback non-SAB input state
 const fallbackKeys = new Set<number>();
@@ -109,13 +139,69 @@ async function ensurePyodide(pyodideBaseUrl: string): Promise<PyodideInstance> {
           checkStopSignal();
           const clamped = Math.max(1, Math.min(250, ms));
           if (waitBuf) {
-            // Non-spinning 60 FPS sleep that wakes immediately on Stop!
+            // Non-spinning 60 FPS sleep that wakes immediately on Stop or Pause!
             Atomics.wait(waitBuf, 0, 0, clamped);
             checkStopSignal();
           }
           // When SharedArrayBuffer is unavailable, `_pywlet_run_async_fallback`
           // yields cooperatively via `await asyncio.sleep(0.016)` so worker
           // postMessage events (keys, mouse, stop) are processed every frame!
+        },
+        debug_get_bp_version: () => {
+          return debugInt32 ? Atomics.load(debugInt32, DEBUG_SLOT_BP_VERSION) : 0;
+        },
+        debug_get_bp_count: () => {
+          return debugInt32 ? Atomics.load(debugInt32, DEBUG_SLOT_BP_COUNT) : 0;
+        },
+        debug_get_breakpoints_json: () => {
+          if (!debugInt32) return '{}';
+          const len = Atomics.load(debugInt32, DEBUG_SLOT_BP_JSON_LEN);
+          return readDebugUtf8(DEBUG_BP_BYTE_OFFSET, len, DEBUG_BP_MAX_BYTES) || '{}';
+        },
+        debug_is_pause_requested: () => {
+          if (!debugInt32) return false;
+          return Atomics.load(debugInt32, DEBUG_SLOT_CMD) === DEBUG_CMD_PAUSE;
+        },
+        debug_get_eval_expr: () => {
+          if (!debugInt32) return '';
+          const len = Atomics.load(debugInt32, DEBUG_SLOT_EVAL_LEN);
+          return readDebugUtf8(DEBUG_EVAL_BYTE_OFFSET, len, DEBUG_EVAL_MAX_BYTES);
+        },
+        debug_get_selected_frame: () => {
+          return debugInt32 ? Atomics.load(debugInt32, DEBUG_SLOT_FRAME_IDX) : 0;
+        },
+        debug_emit_paused: (payloadJson: string) => {
+          self.postMessage({ type: 'DEBUG_PAUSED', payloadJson });
+        },
+        debug_emit_eval_result: (resultJson: string) => {
+          self.postMessage({ type: 'DEBUG_EVAL_RESULT', resultJson });
+        },
+        debug_wait: () => {
+          if (!debugInt32) return DEBUG_CMD_STOP;
+          // Clear any pending PAUSE flag before sleeping so we wait for the next user action
+          if (Atomics.load(debugInt32, DEBUG_SLOT_CMD) === DEBUG_CMD_PAUSE) {
+            Atomics.store(debugInt32, DEBUG_SLOT_CMD, DEBUG_CMD_IDLE);
+          }
+          lastDebugSeq = Atomics.load(debugInt32, DEBUG_SLOT_SEQ);
+          while (true) {
+            if (
+              fallbackStop ||
+              (inputBuf && Atomics.load(inputBuf, 3) !== 0) ||
+              (interruptBuf && Atomics.load(interruptBuf, 0) !== 0)
+            ) {
+              return DEBUG_CMD_STOP;
+            }
+            Atomics.wait(debugInt32, DEBUG_SLOT_SEQ, lastDebugSeq, 200);
+            const curSeq = Atomics.load(debugInt32, DEBUG_SLOT_SEQ);
+            if (curSeq !== lastDebugSeq) {
+              lastDebugSeq = curSeq;
+              const cmd = Atomics.load(debugInt32, DEBUG_SLOT_CMD);
+              Atomics.store(debugInt32, DEBUG_SLOT_CMD, DEBUG_CMD_IDLE);
+              if (cmd !== DEBUG_CMD_IDLE && cmd !== DEBUG_CMD_PAUSE) {
+                return cmd;
+              }
+            }
+          }
         },
       });
 
@@ -212,6 +298,10 @@ self.onmessage = async (event: MessageEvent) => {
     if (msg.interruptSab) interruptBuf = new Int32Array(msg.interruptSab);
     if (msg.inputSab) inputBuf = new Int32Array(msg.inputSab);
     if (msg.waitSab) waitBuf = new Int32Array(msg.waitSab);
+    if (msg.debugSab) {
+      debugInt32 = new Int32Array(msg.debugSab, 0, 16);
+      debugBytes = new Uint8Array(msg.debugSab);
+    }
     try {
       await ensurePyodide(msg.pyodideBaseUrl);
     } catch (err: any) {
@@ -276,7 +366,7 @@ self.onmessage = async (event: MessageEvent) => {
   }
 
   if (msg.type === 'RUN') {
-    const { code, filename, workspaceFiles, imgSizes, pyodideBaseUrl } = msg;
+    const { code, filename, workspaceFiles, imgSizes, pyodideBaseUrl, debugMode } = msg;
     fallbackStop = false;
     pendingEvents.length = 0;
     imageSizes = imgSizes || {};
@@ -284,6 +374,10 @@ self.onmessage = async (event: MessageEvent) => {
     if (interruptBuf) Atomics.store(interruptBuf, 0, 0);
     if (inputBuf) Atomics.store(inputBuf, 3, 0);
     if (waitBuf) Atomics.store(waitBuf, 0, 0);
+    if (debugInt32) {
+      Atomics.store(debugInt32, DEBUG_SLOT_CMD, DEBUG_CMD_IDLE);
+      lastDebugSeq = Atomics.load(debugInt32, DEBUG_SLOT_SEQ);
+    }
 
     try {
       const inst = await ensurePyodide(pyodideBaseUrl);
@@ -293,15 +387,14 @@ self.onmessage = async (event: MessageEvent) => {
       // Run user script inside a clean isolated __main__ namespace
       inst.globals.set('_pywlet_run_code', code);
       inst.globals.set('_pywlet_run_file', filename || 'main.py');
+      inst.globals.set('_pywlet_ws_py_files', Object.keys(workspaceFiles || {}));
+      inst.globals.set('_pywlet_start_paused', Boolean(debugMode));
 
-      if (waitBuf && inputBuf) {
-        // Fast path (SharedArrayBuffer available): run untouched synchronous CPython
-        const execScript = `
-_ns = {'__name__': '__main__', '__file__': _pywlet_run_file}
-_compiled = compile(_pywlet_run_code, _pywlet_run_file, 'exec')
-exec(_compiled, _ns, _ns)
-`;
-        inst.runPython(execScript);
+      if (waitBuf && inputBuf && debugInt32) {
+        // Fast path (SharedArrayBuffer available): run synchronous CPython with on-demand bdb debugger
+        inst.runPython(
+          '_pywlet_run_with_debugger(_pywlet_run_code, _pywlet_run_file, list(_pywlet_ws_py_files.to_py()), bool(_pywlet_start_paused))'
+        );
       } else {
         // Non-SharedArrayBuffer path (e.g. plain HTTP LAN IP or pre-COI load):
         // yield cooperatively on every `while` frame so postMessage keys/mouse/stop work!

@@ -59,6 +59,12 @@
           <button id="btn-run" class="btn btn-run" title="Run your Python code (F5)">
             ▶ Run Game
           </button>
+          <button id="btn-debug" class="btn btn-Ask" title="Start (or restart) in Debug mode paused at line 1 to watch code &amp; variables line-by-line (F9)">
+            🐛 Debug
+          </button>
+          <button id="btn-pause" class="btn btn-small hidden" title="Pause running game to inspect variables">
+            ⏸ Pause
+          </button>
           <button id="btn-stop" class="btn btn-stop" disabled title="Stop running game">
             ⏹ Stop
           </button>
@@ -70,19 +76,25 @@
       <main class="workspace">
         <!-- Left Sidebar: Playspace Browser, Playspace Files & Visual Cheatsheets -->
         <aside class="sidebar">
-          <!-- Playspace Header Bar (full untruncated name + switch & history buttons) -->
+          <!-- Playspace Header Bar (full untruncated name + top view tabs) -->
           <section class="panel-section workspace-header-section">
             <div class="workspace-switcher-stack">
               <div class="workspace-current-info" title="Active Playspace (autosaves continuously)">
                 <span class="workspace-kicker">PLAYSPACE</span>
                 <strong id="sidebar-workspace-name" class="workspace-title-text">Loading...</strong>
               </div>
-              <div class="playspace-header-actions">
-                <button id="btn-toggle-workspace-browser" class="btn btn-small btn-Ask playspace-switch-btn" title="Switch playspace, explore examples, or create a new empty playspace">
-                  📚 Switch
+              <div class="sidebar-view-tabs" role="tablist" aria-label="Sidebar Views">
+                <button id="btn-tab-files" class="sidebar-tab active" role="tab" aria-selected="true" title="View files in this playspace">
+                  📁 Files
                 </button>
-                <button id="btn-toggle-checkpoints" class="btn btn-small playspace-history-btn" title="Save working checkpoints &amp; time-travel back to earlier versions (Ctrl+Shift+S)">
+                <button id="btn-toggle-workspace-browser" class="sidebar-tab" role="tab" aria-selected="false" title="Switch playspace, explore examples, or create a new empty playspace">
+                  📚 Spaces
+                </button>
+                <button id="btn-toggle-checkpoints" class="sidebar-tab" role="tab" aria-selected="false" title="Save working checkpoints &amp; time-travel back (Ctrl+Shift+S)">
                   🕰️ History
+                </button>
+                <button id="btn-tab-debug" class="sidebar-tab" role="tab" aria-selected="false" title="Live variable inspector, call stack &amp; breakpoints">
+                  🐛 Debug
                 </button>
               </div>
             </div>
@@ -136,6 +148,51 @@
             <ul id="checkpoints-list" class="checkpoints-list"></ul>
           </section>
 
+          <!-- View D: Live Step Debugger, Variable Inspector, Call Stack & Breakpoints -->
+          <section id="workspace-debug-panel" class="panel-section workspace-debug-panel hidden">
+            <div class="section-header">
+              <span>VARIABLES</span>
+              <span id="debug-location-meta" class="meta">Idle</span>
+            </div>
+            <div id="debug-vars-container" class="debug-vars-container">
+              <p class="debug-empty-note">
+                Click <strong>🐛 Debug</strong> at the top—or click next to any line number in the editor to set a red breakpoint dot—to inspect live variables line by line!
+              </p>
+            </div>
+
+            <div id="debug-eval-section" class="debug-subsection hidden">
+              <div class="section-header">
+                <span>EVALUATE EXPRESSION</span>
+              </div>
+              <form id="debug-eval-form" class="debug-eval-form">
+                <input
+                  id="input-debug-eval"
+                  type="text"
+                  class="checkpoint-input"
+                  placeholder="e.g. player_x + 10"
+                  autocomplete="off"
+                />
+                <button type="submit" class="btn btn-small btn-Ask">Eval</button>
+              </form>
+              <div id="debug-eval-output" class="debug-eval-output hidden"></div>
+            </div>
+
+            <div id="debug-stack-section" class="debug-subsection hidden">
+              <div class="section-header">
+                <span>CALL STACK</span>
+              </div>
+              <ul id="debug-stack-list" class="debug-stack-list"></ul>
+            </div>
+
+            <div class="debug-subsection">
+              <div class="section-header">
+                <span>BREAKPOINTS</span>
+                <button id="btn-clear-breakpoints" class="icon-btn hidden" title="Remove all breakpoints">Clear</button>
+              </div>
+              <ul id="debug-breakpoints-list" class="debug-bp-list"></ul>
+            </div>
+          </section>
+
           <!-- View B: Open Playspace Files (Python, Sprite Sheets, PNGs, WAVs) -->
           <section id="workspace-files-panel" class="panel-section workspace-files-panel">
             <div class="section-header">
@@ -157,7 +214,7 @@
             <ul id="file-list" class="file-list"></ul>
           </section>
 
-          <section class="panel-section cheatsheet-section">
+          <section id="cheatsheet-section" class="panel-section cheatsheet-section">
             <div class="section-header">
               <span>📚 QUICK CHEATSHEETS</span>
             </div>
@@ -171,6 +228,8 @@
             <div id="cheatsheet-content" class="cheatsheet-card"></div>
           </section>
         </aside>
+
+        <div id="resizer-left" class="panel-resizer" role="separator" aria-orientation="vertical" title="Drag to resize left panel (double-click to reset)"></div>
 
         <!-- Center Pane: Unified File-Driven Editor (Code / Sprite Sheet / Single PNG / WAV Audio) + Console -->
         <section class="editor-column">
@@ -190,6 +249,28 @@
                 </button>
               </div>
               <span id="syntax-badge" class="badge badge-ok">✓ No Syntax Issues</span>
+            </div>
+          </div>
+
+          <!-- Slim Step Debugger Bar (shown ONLY while paused or actively stepping) -->
+          <div id="debug-toolbar" class="debug-toolbar hidden">
+            <span id="debug-toolbar-status" class="debug-status-label">⏸ Paused</span>
+            <div class="debug-toolbar-actions">
+              <button id="btn-dbg-continue" class="btn btn-small btn-run" title="Continue running until next breakpoint (F5)">
+                ▶ Continue
+              </button>
+              <button id="btn-dbg-step-over" class="btn btn-small btn-Ask" title="Run current line and pause on next line (F10)">
+                ⤵ Step Over
+              </button>
+              <button id="btn-dbg-step-into" class="btn btn-small" title="Step inside a function call on this line (F11)">
+                ↘ Step Into
+              </button>
+              <button id="btn-dbg-step-out" class="btn btn-small" title="Finish current function and return to caller (Shift+F11)">
+                ↗ Step Out
+              </button>
+              <button id="btn-dbg-slowmo" class="btn btn-small" title="Auto-step slowly so you can watch variables &amp; drawings update line-by-line">
+                🐢 Slow-Mo
+              </button>
             </div>
           </div>
 
@@ -239,6 +320,8 @@
             <pre id="console-output" class="console-output">Welcome to Pywlet! Click "▶ Run Game" to start your program.</pre>
           </div>
         </section>
+
+        <div id="resizer-right" class="panel-resizer" role="separator" aria-orientation="vertical" title="Drag to resize right panel (double-click to reset)"></div>
 
         <!-- Right Column: Pygame Canvas Stage + Socratic AI Tutor -->
         <section class="stage-tutor-column">

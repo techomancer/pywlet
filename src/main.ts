@@ -1,6 +1,11 @@
 import { CodeEditorController } from './editor/monaco-setup';
 import { analyzePythonCodeForLearners, type PythonDiagnostic } from './diagnostics/python-coach';
 import { PythonPygameRuntime } from './runtime/python-runtime';
+import type {
+  DebugEvalResult,
+  DebugPausePayload,
+  DebugVariableNode,
+} from './runtime/debug-types';
 import { TutorService } from './llm/tutor-service';
 import type { LLMBackendId, LLMDebugEvent, TutorCodeContext } from './llm/types';
 import {
@@ -38,12 +43,23 @@ async function bootstrapPywlet(): Promise<void> {
   let activeBannerDiagnostic: PythonDiagnostic | null = null;
   let lintDebounceTimer: number | null = null;
   let lintRequestCounter = 0;
-  let sidebarMode: 'files' | 'browser' | 'history' = 'files';
+  let sidebarMode: 'files' | 'browser' | 'history' | 'debug' = 'files';
   let spriteSheetViewMode: 'visual' | 'code' = 'visual';
   let spriteDataWriteProtected = true;
 
+  // Step Debugger UI state
+  let breakpointsByFile: Record<string, number[]> = {};
+  let activeDebugPause: DebugPausePayload | null = null;
+  let prevDebugVarMap: Map<string, string> = new Map();
+  let lastDebugChangedMap: Map<string, string> = new Map();
+  const expandedDebugPaths = new Set<string>();
+  let slowMoActive = false;
+  let slowMoTimer: number | null = null;
+
   // DOM Elements
   const workspaceEl = document.querySelector('.workspace') as HTMLElement;
+  const resizerLeftEl = document.getElementById('resizer-left')!;
+  const resizerRightEl = document.getElementById('resizer-right')!;
   const monacoContainer = document.getElementById('monaco-container')!;
   const spriteStudioContainer = document.getElementById('sprite-studio-container')!;
   const wavEditorContainer = document.getElementById('wav-editor-container')!;
@@ -51,11 +67,15 @@ async function bootstrapPywlet(): Promise<void> {
   const themeSelect = document.getElementById('theme-select') as HTMLSelectElement;
   const btnToggleIcons = document.getElementById('btn-toggle-icons')!;
   const sidebarWorkspaceNameEl = document.getElementById('sidebar-workspace-name')!;
+  const btnTabFiles = document.getElementById('btn-tab-files')!;
   const btnToggleWorkspaceBrowser = document.getElementById('btn-toggle-workspace-browser')!;
   const btnToggleCheckpoints = document.getElementById('btn-toggle-checkpoints')!;
+  const btnTabDebug = document.getElementById('btn-tab-debug')!;
   const workspaceBrowserPanel = document.getElementById('workspace-browser-panel')!;
   const workspaceHistoryPanel = document.getElementById('workspace-history-panel')!;
+  const workspaceDebugPanel = document.getElementById('workspace-debug-panel')!;
   const workspaceFilesPanel = document.getElementById('workspace-files-panel')!;
+  const cheatsheetSectionEl = document.getElementById('cheatsheet-section')!;
   const savedWorkspacesListEl = document.getElementById('saved-workspaces-list')!;
   const savedWorkspacesCountEl = document.getElementById('saved-workspaces-count')!;
   const exampleWorkspacesListEl = document.getElementById('example-workspaces-list')!;
@@ -64,6 +84,25 @@ async function bootstrapPywlet(): Promise<void> {
   const inputCheckpointLabel = document.getElementById('input-checkpoint-label') as HTMLInputElement;
   const checkpointsCountEl = document.getElementById('checkpoints-count')!;
   const checkpointsListEl = document.getElementById('checkpoints-list')!;
+
+  // Step Debugger DOM elements
+  const debugToolbarEl = document.getElementById('debug-toolbar')!;
+  const debugToolbarStatusEl = document.getElementById('debug-toolbar-status')!;
+  const btnDbgContinue = document.getElementById('btn-dbg-continue') as HTMLButtonElement;
+  const btnDbgStepOver = document.getElementById('btn-dbg-step-over') as HTMLButtonElement;
+  const btnDbgStepInto = document.getElementById('btn-dbg-step-into') as HTMLButtonElement;
+  const btnDbgStepOut = document.getElementById('btn-dbg-step-out') as HTMLButtonElement;
+  const btnDbgSlowMo = document.getElementById('btn-dbg-slowmo') as HTMLButtonElement;
+  const debugLocationMetaEl = document.getElementById('debug-location-meta')!;
+  const debugVarsContainerEl = document.getElementById('debug-vars-container')!;
+  const debugEvalSectionEl = document.getElementById('debug-eval-section')!;
+  const debugEvalForm = document.getElementById('debug-eval-form') as HTMLFormElement;
+  const inputDebugEval = document.getElementById('input-debug-eval') as HTMLInputElement;
+  const debugEvalOutputEl = document.getElementById('debug-eval-output')!;
+  const debugStackSectionEl = document.getElementById('debug-stack-section')!;
+  const debugStackListEl = document.getElementById('debug-stack-list')!;
+  const debugBreakpointsListEl = document.getElementById('debug-breakpoints-list')!;
+  const btnClearBreakpoints = document.getElementById('btn-clear-breakpoints')!;
 
   const fileListEl = document.getElementById('file-list')!;
   const newFileToolbarEl = document.getElementById('new-file-toolbar')!;
@@ -113,6 +152,8 @@ async function bootstrapPywlet(): Promise<void> {
   const btnNewSpritesSheet = document.getElementById('btn-new-sprites-sheet')!;
   const inputImportFile = document.getElementById('input-import-workspace-file') as HTMLInputElement;
   const btnRun = document.getElementById('btn-run') as HTMLButtonElement;
+  const btnDebug = document.getElementById('btn-debug') as HTMLButtonElement;
+  const btnPause = document.getElementById('btn-pause') as HTMLButtonElement;
   const btnStop = document.getElementById('btn-stop') as HTMLButtonElement;
   const btnExplainSelection = document.getElementById('btn-explain-selection')!;
   const btnAskDiagnostic = document.getElementById('btn-ask-diagnostic')!;
@@ -250,6 +291,9 @@ async function bootstrapPywlet(): Promise<void> {
     (cursorCtx) => {
       const target = cursorCtx.selectedText || cursorCtx.cursorWord || cursorCtx.lineText.trim();
       askTutorQuestion(`Can you explain what \`${target}\` on line ${cursorCtx.lineNumber} does in my code?`);
+    },
+    (lineNumber) => {
+      toggleBreakpointOnActiveFile(lineNumber);
     }
   );
 
@@ -311,16 +355,34 @@ async function bootstrapPywlet(): Promise<void> {
         runtimeStatusEl.textContent = 'Python 3.14 Running (60 FPS)';
         runtimeStatusEl.className = 'status-pill status-running';
         btnStop.disabled = false;
+        btnPause.classList.toggle('hidden', !runtime.isDebugSupported());
+        canvasOverlayEl.classList.add('hidden');
+      } else if (status === 'paused') {
+        runtimeStatusEl.textContent = '⏸ Paused (Debug)';
+        runtimeStatusEl.className = 'status-pill status-paused';
+        btnStop.disabled = false;
+        btnPause.classList.add('hidden');
         canvasOverlayEl.classList.add('hidden');
       } else if (status === 'loading') {
         runtimeStatusEl.textContent = 'Loading Python (Pyodide)...';
         runtimeStatusEl.className = 'status-pill status-ready';
         btnStop.disabled = !runtime.isRunning();
+        btnPause.classList.add('hidden');
       } else {
         runtimeStatusEl.textContent = runtime.isPyodideReady() ? 'Python 3.14 Ready' : 'Python Ready';
         runtimeStatusEl.className = 'status-pill status-ready';
         btnStop.disabled = true;
+        btnPause.classList.add('hidden');
       }
+    },
+    onDebugPaused: (payload) => {
+      handleDebugPaused(payload);
+    },
+    onDebugResumed: () => {
+      handleDebugResumed();
+    },
+    onDebugEvalResult: (res) => {
+      renderDebugEvalResult(res);
     },
     onPyodideReady: () => {
       // Immediately run authentic CPython AST lint on the currently open Python file
@@ -444,10 +506,16 @@ async function bootstrapPywlet(): Promise<void> {
       syntaxBadgeEl.classList.remove('hidden');
       codeEditorActionsEl.classList.remove('hidden');
       editor.setReadOnly(
-        isWsReadOnly,
-        '📖 This is a read-only Example Playspace. Click "📋 Clone to Edit" above to create your own editable copy!'
+        isWsReadOnly || Boolean(activeDebugPause),
+        activeDebugPause
+          ? '⏸ Paused in Step Debugger — click ⏹ Stop to edit your code!'
+          : '📖 This is a read-only Example Playspace. Click "📋 Clone to Edit" above to create your own editable copy!'
       );
       editor.setValue(content);
+      editor.setBreakpointLines(breakpointsByFile[filename] || []);
+      editor.setDebugExecutionLine(
+        activeDebugPause && activeDebugPause.filename === filename ? activeDebugPause.lineno : null
+      );
       editor.layout();
       runLiveDiagnostics(content);
     } else if (kind === 'sprite-sheet') {
@@ -495,6 +563,7 @@ async function bootstrapPywlet(): Promise<void> {
     }
 
     renderFileList();
+    resetDebugIfWorkspaceChanged();
   }
 
   tabSpriteVisual.addEventListener('click', () => {
@@ -544,31 +613,398 @@ async function bootstrapPywlet(): Promise<void> {
       : d.toLocaleDateString([], { month: 'short', day: 'numeric' });
   }
 
-  function setSidebarMode(mode: 'files' | 'browser' | 'history'): void {
+  function setSidebarMode(mode: 'files' | 'browser' | 'history' | 'debug'): void {
     const isRo = workspace.isActiveWorkspaceReadOnly();
     if (mode === 'history' && isRo) {
       mode = 'files';
     }
     sidebarMode = mode;
 
+    workspaceFilesPanel.classList.toggle('hidden', mode !== 'files');
     workspaceBrowserPanel.classList.toggle('hidden', mode !== 'browser');
     workspaceHistoryPanel.classList.toggle('hidden', mode !== 'history');
-    workspaceFilesPanel.classList.toggle('hidden', mode !== 'files');
+    workspaceDebugPanel.classList.toggle('hidden', mode !== 'debug');
+    cheatsheetSectionEl.classList.toggle('hidden', mode === 'debug');
 
-    btnToggleWorkspaceBrowser.textContent =
-      mode === 'browser' ? '← Files' : isRo ? '📚 Switch Playspace' : '📚 Switch';
-    btnToggleWorkspaceBrowser.classList.toggle('active-toggle', mode === 'browser');
+    btnTabFiles.classList.toggle('active', mode === 'files');
+    btnTabFiles.setAttribute('aria-selected', String(mode === 'files'));
+
+    btnToggleWorkspaceBrowser.classList.toggle('active', mode === 'browser');
+    btnToggleWorkspaceBrowser.setAttribute('aria-selected', String(mode === 'browser'));
 
     const cpCount = workspace.listCheckpoints().length;
     btnToggleCheckpoints.classList.toggle('hidden', isRo);
-    btnToggleCheckpoints.textContent =
-      mode === 'history' ? '← Files' : cpCount > 0 ? `🕰️ History (${cpCount})` : '🕰️ History';
-    btnToggleCheckpoints.classList.toggle('active-toggle', mode === 'history');
+    btnToggleCheckpoints.textContent = cpCount > 0 ? `🕰️ History (${cpCount})` : '🕰️ History';
+    btnToggleCheckpoints.classList.toggle('active', mode === 'history');
+    btnToggleCheckpoints.setAttribute('aria-selected', String(mode === 'history'));
+
+    const totalBps = Object.values(breakpointsByFile).reduce((sum, arr) => sum + arr.length, 0);
+    btnTabDebug.textContent = activeDebugPause
+      ? '⏸ Debug'
+      : totalBps > 0
+      ? `🐛 Debug (${totalBps})`
+      : '🐛 Debug';
+    btnTabDebug.classList.toggle('active', mode === 'debug');
+    btnTabDebug.classList.toggle('has-alert', Boolean(activeDebugPause));
+    btnTabDebug.setAttribute('aria-selected', String(mode === 'debug'));
 
     if (mode === 'browser') {
       renderWorkspaceBrowser();
     } else if (mode === 'history') {
       renderCheckpointsPanel();
+    } else if (mode === 'debug') {
+      renderDebugPanel();
+    }
+  }
+
+  // ---- Step Debugger UI Helpers ----
+
+  function clearSlowMoTimer(): void {
+    if (slowMoTimer !== null) {
+      window.clearTimeout(slowMoTimer);
+      slowMoTimer = null;
+    }
+  }
+
+  function setSlowMo(enabled: boolean): void {
+    slowMoActive = enabled;
+    btnDbgSlowMo.classList.toggle('active-toggle', enabled);
+    btnDbgSlowMo.textContent = enabled ? '🐢 Slow-Mo: On' : '🐢 Slow-Mo';
+    clearSlowMoTimer();
+    if (enabled && runtime.isPaused()) {
+      slowMoTimer = window.setTimeout(() => {
+        slowMoTimer = null;
+        if (slowMoActive && runtime.isPaused()) {
+          runtime.stepOver();
+        }
+      }, 380);
+    }
+  }
+
+  function clearAllBreakpoints(): void {
+    breakpointsByFile = {};
+    runtime.setBreakpoints(breakpointsByFile);
+    editor.setBreakpointLines([]);
+    renderDebugBreakpointsList();
+    setSidebarMode(sidebarMode);
+  }
+
+  function toggleBreakpointOnActiveFile(lineNumber: number): void {
+    const filename = workspace.getActiveFileName();
+    if (classifyWorkspaceFile(filename, workspace.getFileContent(filename)) !== 'python') return;
+    const cur = new Set(breakpointsByFile[filename] || []);
+    if (cur.has(lineNumber)) {
+      cur.delete(lineNumber);
+    } else {
+      cur.add(lineNumber);
+    }
+    const sorted = Array.from(cur).sort((a, b) => a - b);
+    if (sorted.length > 0) {
+      breakpointsByFile[filename] = sorted;
+    } else {
+      delete breakpointsByFile[filename];
+    }
+    editor.setBreakpointLines(sorted);
+    runtime.setBreakpoints(breakpointsByFile);
+    renderDebugBreakpointsList();
+    setSidebarMode(sidebarMode);
+  }
+
+  function renderDebugBreakpointsList(): void {
+    debugBreakpointsListEl.innerHTML = '';
+    const entries: Array<{ file: string; line: number }> = [];
+    for (const [file, lines] of Object.entries(breakpointsByFile)) {
+      for (const line of lines) entries.push({ file, line });
+    }
+    btnClearBreakpoints.classList.toggle('hidden', entries.length === 0);
+
+    if (entries.length === 0) {
+      const empty = document.createElement('li');
+      empty.className = 'debug-empty-note';
+      empty.textContent = 'No breakpoints set. Click next to any line number in the editor to add a red dot!';
+      debugBreakpointsListEl.appendChild(empty);
+      return;
+    }
+
+    for (const { file, line } of entries) {
+      const li = document.createElement('li');
+      li.className = 'debug-bp-item';
+      li.innerHTML = `
+        <span><span class="debug-bp-dot"></span><span></span></span>
+        <button class="icon-btn file-mini-btn" title="Remove breakpoint">✕</button>
+      `;
+      li.querySelector('span span:last-child')!.textContent = `${file}:${line}`;
+      li.addEventListener('click', () => {
+        if (workspace.getFileContent(file) !== null) {
+          workspace.setActiveFile(file);
+          openActiveFileInEditor(true);
+          editor.revealLine(line);
+        }
+      });
+      li.querySelector('button')!.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const next = (breakpointsByFile[file] || []).filter((n) => n !== line);
+        if (next.length > 0) breakpointsByFile[file] = next;
+        else delete breakpointsByFile[file];
+        if (workspace.getActiveFileName() === file) {
+          editor.setBreakpointLines(next);
+        }
+        runtime.setBreakpoints(breakpointsByFile);
+        renderDebugBreakpointsList();
+        setSidebarMode(sidebarMode);
+      });
+      debugBreakpointsListEl.appendChild(li);
+    }
+  }
+
+  function buildDebugVarTreeEl(
+    node: DebugVariableNode,
+    path: string,
+    isTopLevel: boolean
+  ): HTMLElement {
+    const row = document.createElement('div');
+    const prevVal = isTopLevel ? lastDebugChangedMap.get(node.name) : undefined;
+    row.className = `debug-var-row ${prevVal !== undefined ? 'changed' : ''}`;
+
+    const main = document.createElement('div');
+    main.className = 'debug-var-main';
+
+    const hasChildren = Boolean(node.expandable && node.children && node.children.length > 0);
+    const isExpanded = hasChildren && expandedDebugPaths.has(path);
+
+    if (hasChildren) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'debug-var-expand';
+      btn.textContent = isExpanded ? '▾' : '▸';
+      btn.title = isExpanded ? 'Collapse' : 'Expand';
+      btn.addEventListener('click', () => {
+        if (expandedDebugPaths.has(path)) expandedDebugPaths.delete(path);
+        else expandedDebugPaths.add(path);
+        renderDebugPanel();
+      });
+      main.appendChild(btn);
+    }
+
+    const nameEl = document.createElement('span');
+    nameEl.className = 'debug-var-name';
+    nameEl.textContent = `${node.name}:`;
+    main.appendChild(nameEl);
+
+    if (node.colorHex) {
+      const dot = document.createElement('span');
+      dot.className = 'color-dot';
+      dot.style.background = node.colorHex;
+      dot.title = `RGB color ${node.colorHex}`;
+      main.appendChild(dot);
+    }
+
+    const valEl = document.createElement('span');
+    valEl.className = 'debug-var-val';
+    valEl.textContent = node.preview;
+    valEl.title = `${node.name} (${node.type}) = ${node.preview}`;
+    main.appendChild(valEl);
+
+    const typeEl = document.createElement('span');
+    typeEl.className = 'debug-var-type';
+    typeEl.textContent = node.type;
+    main.appendChild(typeEl);
+
+    row.appendChild(main);
+
+    if (prevVal !== undefined) {
+      const diffEl = document.createElement('div');
+      diffEl.className = 'debug-var-diff';
+      diffEl.textContent = `changed: ${prevVal} → ${node.preview}`;
+      row.appendChild(diffEl);
+    }
+
+    if (isExpanded && node.children) {
+      const childrenWrap = document.createElement('div');
+      childrenWrap.className = 'debug-var-children';
+      for (const child of node.children) {
+        childrenWrap.appendChild(buildDebugVarTreeEl(child, `${path}.${child.name}`, false));
+      }
+      row.appendChild(childrenWrap);
+    }
+
+    return row;
+  }
+
+  function renderDebugPanel(): void {
+    renderDebugBreakpointsList();
+
+    if (!activeDebugPause) {
+      debugLocationMetaEl.textContent = runtime.isRunning() ? 'Running…' : 'Idle';
+      debugEvalSectionEl.classList.add('hidden');
+      debugStackSectionEl.classList.add('hidden');
+      debugVarsContainerEl.innerHTML = runtime.isRunning()
+        ? `<p class="debug-empty-note">Game is running! Click <strong>⏸ Pause</strong> at the top or click next to a line number to set a breakpoint and inspect variables.</p>`
+        : `<p class="debug-empty-note">Click <strong>🐛 Debug</strong> at the top—or click next to any line number to set a red breakpoint dot—to watch your code and variables line by line!</p>`;
+      return;
+    }
+
+    debugLocationMetaEl.textContent = `${activeDebugPause.filename}:${activeDebugPause.lineno}`;
+    debugEvalSectionEl.classList.remove('hidden');
+    debugVarsContainerEl.innerHTML = '';
+
+    const hasLocals = activeDebugPause.locals.length > 0;
+    const hasGlobals = activeDebugPause.globals.length > 0;
+
+    if (!hasLocals && !hasGlobals) {
+      const empty = document.createElement('p');
+      empty.className = 'debug-empty-note';
+      empty.textContent = 'No variables defined yet—click Step Over to execute this line!';
+      debugVarsContainerEl.appendChild(empty);
+    } else {
+      if (hasLocals) {
+        if (hasGlobals) {
+          const h = document.createElement('div');
+          h.className = 'debug-scope-heading';
+          h.textContent = 'LOCAL VARIABLES';
+          debugVarsContainerEl.appendChild(h);
+        }
+        for (const v of activeDebugPause.locals) {
+          debugVarsContainerEl.appendChild(buildDebugVarTreeEl(v, `local:${v.name}`, true));
+        }
+      }
+      if (hasGlobals) {
+        const h = document.createElement('div');
+        h.className = 'debug-scope-heading';
+        h.textContent = 'GLOBAL VARIABLES';
+        debugVarsContainerEl.appendChild(h);
+        for (const v of activeDebugPause.globals) {
+          debugVarsContainerEl.appendChild(buildDebugVarTreeEl(v, `global:${v.name}`, false));
+        }
+      }
+    }
+
+    // Call Stack
+    debugStackSectionEl.classList.toggle('hidden', activeDebugPause.stack.length <= 1);
+    debugStackListEl.innerHTML = '';
+    for (const frame of activeDebugPause.stack) {
+      const li = document.createElement('li');
+      li.className = `debug-stack-item ${
+        frame.index === activeDebugPause.selectedFrameIndex ? 'active' : ''
+      }`;
+      const fnName = frame.funcName === '<module>' ? '(top level)' : `${frame.funcName}()`;
+      li.textContent = `${fnName} — ${frame.filename}:${frame.lineno}`;
+      li.addEventListener('click', () => {
+        runtime.selectDebugFrame(frame.index);
+      });
+      debugStackListEl.appendChild(li);
+    }
+  }
+
+  function renderDebugEvalResult(res: DebugEvalResult): void {
+    debugEvalOutputEl.classList.remove('hidden');
+    debugEvalOutputEl.classList.toggle('is-err', !res.ok);
+    debugEvalOutputEl.innerHTML = '';
+    if (!res.ok) {
+      debugEvalOutputEl.textContent = `❌ ${res.error || 'Error'}`;
+      return;
+    }
+    if (res.colorHex) {
+      const dot = document.createElement('span');
+      dot.className = 'color-dot';
+      dot.style.background = res.colorHex;
+      debugEvalOutputEl.appendChild(dot);
+    }
+    const text = document.createElement('span');
+    text.textContent = `${res.expr} ⇒ ${res.value} (${res.type})`;
+    debugEvalOutputEl.appendChild(text);
+  }
+
+  function handleDebugPaused(payload: DebugPausePayload): void {
+    // Track which top-level local variables changed since the previous pause
+    const nextChanged = new Map<string, string>();
+    const nextPrev = new Map<string, string>();
+    for (const v of payload.locals) {
+      nextPrev.set(v.name, v.preview);
+      const old = prevDebugVarMap.get(v.name);
+      if (old !== undefined && old !== v.preview) {
+        nextChanged.set(v.name, old);
+      }
+    }
+    if (payload.selectedFrameIndex === 0) {
+      lastDebugChangedMap = nextChanged;
+      prevDebugVarMap = nextPrev;
+    } else {
+      lastDebugChangedMap = new Map();
+    }
+
+    activeDebugPause = payload;
+
+    // Show slim stepping bar above Monaco
+    debugToolbarEl.classList.remove('hidden');
+    const reasonTag =
+      payload.reason === 'breakpoint'
+        ? '🔴 Breakpoint'
+        : payload.reason === 'pause'
+        ? '⏸ Paused'
+        : '⏸ Step';
+    debugToolbarStatusEl.textContent = `${reasonTag} · ${payload.filename}:${payload.lineno}`;
+
+    // Auto-switch to the paused Python file if stepping entered another workspace file
+    if (
+      workspace.getActiveFileName() !== payload.filename &&
+      workspace.getFileContent(payload.filename) !== null
+    ) {
+      workspace.setActiveFile(payload.filename);
+      openActiveFileInEditor(true);
+    } else {
+      editor.setReadOnly(
+        true,
+        '⏸ Paused in Step Debugger — click ⏹ Stop to edit your code!'
+      );
+      editor.setDebugExecutionLine(payload.lineno);
+    }
+
+    // Unhide left sidebar and switch to Debug view automatically on first pause
+    if (workspaceEl.classList.contains('hide-left')) {
+      workspaceEl.classList.remove('hide-left');
+      updateLayoutToggleButtons();
+    }
+    setSidebarMode('debug');
+
+    // Schedule next automatic step if Slow-Mo is active
+    clearSlowMoTimer();
+    if (slowMoActive && runtime.isPaused()) {
+      slowMoTimer = window.setTimeout(() => {
+        slowMoTimer = null;
+        if (slowMoActive && runtime.isPaused()) {
+          runtime.stepOver();
+        }
+      }, 380);
+    }
+  }
+
+  function handleDebugResumed(): void {
+    clearSlowMoTimer();
+    editor.setDebugExecutionLine(null);
+
+    if (!runtime.isRunning()) {
+      activeDebugPause = null;
+      prevDebugVarMap.clear();
+      lastDebugChangedMap.clear();
+      setSlowMo(false);
+      debugToolbarEl.classList.add('hidden');
+      debugEvalOutputEl.classList.add('hidden');
+
+      // Restore normal editor write permissions
+      const activeName = workspace.getActiveFileName();
+      const kind = classifyWorkspaceFile(activeName, workspace.getFileContent(activeName));
+      const isWsReadOnly = workspace.isActiveWorkspaceReadOnly();
+      if (kind === 'python') {
+        editor.setReadOnly(
+          isWsReadOnly,
+          '📖 This is a read-only Example Playspace. Click "📋 Clone to Edit" above to create your own editable copy!'
+        );
+      }
+      setSidebarMode(sidebarMode);
+    } else {
+      // Resumed running (Continue / stepping briefly)
+      debugToolbarStatusEl.textContent = '▶ Running…';
     }
   }
 
@@ -576,8 +1012,17 @@ async function bootstrapPywlet(): Promise<void> {
     const ws = workspace.getActiveWorkspace();
     const isRo = workspace.isActiveWorkspaceReadOnly();
     sidebarWorkspaceNameEl.textContent = isRo ? `📖 ${ws.name}` : ws.name;
-    // Keep Switch / History button labels & count in sync
+    // Keep sidebar tab states & counts in sync
     setSidebarMode(isRo && sidebarMode === 'history' ? 'files' : sidebarMode);
+  }
+
+  let lastWorkspaceId = workspace.getActiveWorkspace().id;
+  function resetDebugIfWorkspaceChanged(): void {
+    const curId = workspace.getActiveWorkspace().id;
+    if (curId !== lastWorkspaceId) {
+      lastWorkspaceId = curId;
+      clearAllBreakpoints();
+    }
   }
 
   function renderCheckpointsPanel(): void {
@@ -898,6 +1343,17 @@ async function bootstrapPywlet(): Promise<void> {
           }
         : undefined,
       allDiagnostics: currentDiagnostics.slice(0, 5),
+      debugState: activeDebugPause
+        ? {
+            filename: activeDebugPause.filename,
+            line: activeDebugPause.lineno,
+            variables: activeDebugPause.locals.map((v) => ({
+              name: v.name,
+              type: v.type,
+              preview: v.preview,
+            })),
+          }
+        : undefined,
     };
   }
 
@@ -920,15 +1376,36 @@ async function bootstrapPywlet(): Promise<void> {
     });
   }
 
-  function runActiveGame(): void {
+  function runActiveGame(debugMode = false): void {
     const runnable = workspace.getRunnablePythonFile();
     if (!runnable) {
       appendConsole('❌ No runnable Python file found in this playspace.');
       return;
     }
+    if (debugMode && !runtime.isDebugSupported()) {
+      appendConsole(
+        '⚠️ Step Debugger requires Cross-Origin Isolation (SharedArrayBuffer), which works on localhost and HTTPS (GitHub Pages / installed app).'
+      );
+      return;
+    }
+    prevDebugVarMap.clear();
+    lastDebugChangedMap.clear();
     syncSpriteProjectFromWorkspace();
-    consoleOutputEl.textContent = `▶ Running ${runnable.filename} (Python 3.14)...`;
-    void runtime.runCode(runnable.code, runnable.filename, workspace.getFiles());
+    if (debugMode) {
+      if (workspace.getActiveFileName() !== runnable.filename) {
+        workspace.setActiveFile(runnable.filename);
+        openActiveFileInEditor(true);
+      }
+      if (workspaceEl.classList.contains('hide-left')) {
+        workspaceEl.classList.remove('hide-left');
+        updateLayoutToggleButtons();
+      }
+      setSidebarMode('debug');
+      consoleOutputEl.textContent = `🐛 Stepping ${runnable.filename} (Python 3.14 Debugger)...`;
+    } else {
+      consoleOutputEl.textContent = `▶ Running ${runnable.filename} (Python 3.14)...`;
+    }
+    void runtime.runCode(runnable.code, runnable.filename, workspace.getFiles(), { debugMode });
   }
 
   // 7. Wire UI Events & Layout Toggles
@@ -949,11 +1426,13 @@ async function bootstrapPywlet(): Promise<void> {
   btnToggleLeftPanel.addEventListener('click', () => {
     workspaceEl.classList.toggle('hide-left');
     updateLayoutToggleButtons();
+    applyPanelWidths(false);
   });
 
   btnToggleRightPanel.addEventListener('click', () => {
     workspaceEl.classList.toggle('hide-right');
     updateLayoutToggleButtons();
+    applyPanelWidths(false);
   });
 
   btnFocusMode.addEventListener('click', () => {
@@ -966,18 +1445,160 @@ async function bootstrapPywlet(): Promise<void> {
       workspaceEl.classList.add('hide-left', 'hide-right');
     }
     updateLayoutToggleButtons();
+    applyPanelWidths(false);
+  });
+
+  // Sidebar Top Tabs
+  btnTabFiles.addEventListener('click', () => {
+    setSidebarMode('files');
   });
 
   btnToggleWorkspaceBrowser.addEventListener('click', () => {
-    setSidebarMode(sidebarMode === 'browser' ? 'files' : 'browser');
+    setSidebarMode('browser');
   });
 
   btnToggleCheckpoints.addEventListener('click', () => {
-    setSidebarMode(sidebarMode === 'history' ? 'files' : 'history');
+    setSidebarMode('history');
     if (sidebarMode === 'history') {
       inputCheckpointLabel.focus();
     }
   });
+
+  btnTabDebug.addEventListener('click', () => {
+    setSidebarMode('debug');
+  });
+
+  // Step Debugger Toolbar & Eval Controls
+  btnDebug.addEventListener('click', () => runActiveGame(true));
+  btnPause.addEventListener('click', () => runtime.pause());
+  btnDbgContinue.addEventListener('click', () => {
+    setSlowMo(false);
+    runtime.continueDebug();
+  });
+  btnDbgStepOver.addEventListener('click', () => {
+    setSlowMo(false);
+    runtime.stepOver();
+  });
+  btnDbgStepInto.addEventListener('click', () => {
+    setSlowMo(false);
+    runtime.stepInto();
+  });
+  btnDbgStepOut.addEventListener('click', () => {
+    setSlowMo(false);
+    runtime.stepOut();
+  });
+  btnDbgSlowMo.addEventListener('click', () => {
+    setSlowMo(!slowMoActive);
+  });
+  btnClearBreakpoints.addEventListener('click', () => {
+    clearAllBreakpoints();
+  });
+  debugEvalForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const expr = inputDebugEval.value.trim();
+    if (!expr || !runtime.isPaused()) return;
+    runtime.evaluateDebugExpression(expr);
+  });
+
+  // Draggable Left & Right Panel Resizers with Proportional Defaults & Minimum Widths
+  const PANEL_WIDTHS_KEY = 'pywlet_panel_widths_v1';
+  const MIN_LEFT_W = 210;
+  const MIN_RIGHT_W = 420;
+  const MIN_CENTER_W = 300;
+  let customLeftW: number | null = null;
+  let customRightW: number | null = null;
+
+  const getDefaultLeftW = () => Math.round(Math.max(235, Math.min(310, window.innerWidth * 0.19)));
+  const getDefaultRightW = () => Math.round(Math.max(428, Math.min(540, window.innerWidth * 0.30)));
+
+  const applyPanelWidths = (persist = false): void => {
+    const vw = Math.max(960, window.innerWidth);
+    const rightHidden = workspaceEl.classList.contains('hide-right');
+    const leftHidden = workspaceEl.classList.contains('hide-left');
+
+    const activeRight = rightHidden ? 0 : customRightW ?? getDefaultRightW();
+    const maxLeft = Math.max(MIN_LEFT_W, Math.min(480, vw - MIN_CENTER_W - activeRight - 10));
+    const finalLeft = Math.round(
+      Math.max(MIN_LEFT_W, Math.min(maxLeft, customLeftW ?? getDefaultLeftW()))
+    );
+
+    const activeLeft = leftHidden ? 0 : finalLeft;
+    const maxRight = Math.max(MIN_RIGHT_W, Math.min(680, vw - MIN_CENTER_W - activeLeft - 10));
+    const finalRight = Math.round(
+      Math.max(MIN_RIGHT_W, Math.min(maxRight, customRightW ?? getDefaultRightW()))
+    );
+
+    workspaceEl.style.setProperty('--left-col-w', `${finalLeft}px`);
+    workspaceEl.style.setProperty('--right-col-w', `${finalRight}px`);
+    editor.layout();
+
+    if (persist) {
+      try {
+        localStorage.setItem(
+          PANEL_WIDTHS_KEY,
+          JSON.stringify({ left: customLeftW, right: customRightW })
+        );
+      } catch {
+        // Ignore storage errors
+      }
+    }
+  };
+
+  try {
+    const raw = localStorage.getItem(PANEL_WIDTHS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as { left?: number | null; right?: number | null };
+      if (typeof parsed.left === 'number' && parsed.left >= MIN_LEFT_W) customLeftW = parsed.left;
+      if (typeof parsed.right === 'number' && parsed.right >= MIN_RIGHT_W) customRightW = parsed.right;
+    }
+  } catch {
+    // Ignore
+  }
+  applyPanelWidths(false);
+
+  const attachPanelResizer = (handleEl: HTMLElement, side: 'left' | 'right'): void => {
+    handleEl.addEventListener('pointerdown', (startEvt: PointerEvent) => {
+      startEvt.preventDefault();
+      handleEl.setPointerCapture(startEvt.pointerId);
+      handleEl.classList.add('dragging');
+      workspaceEl.classList.add('is-resizing');
+      document.body.classList.add('resizing-panels');
+
+      const onMove = (moveEvt: PointerEvent) => {
+        const rect = workspaceEl.getBoundingClientRect();
+        if (side === 'left') {
+          customLeftW = Math.max(MIN_LEFT_W, Math.round(moveEvt.clientX - rect.left));
+        } else {
+          customRightW = Math.max(MIN_RIGHT_W, Math.round(rect.right - moveEvt.clientX));
+        }
+        applyPanelWidths(false);
+      };
+
+      const onUp = () => {
+        handleEl.classList.remove('dragging');
+        workspaceEl.classList.remove('is-resizing');
+        document.body.classList.remove('resizing-panels');
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+        window.removeEventListener('pointercancel', onUp);
+        applyPanelWidths(true);
+      };
+
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+      window.addEventListener('pointercancel', onUp);
+    });
+
+    handleEl.addEventListener('dblclick', () => {
+      if (side === 'left') customLeftW = null;
+      else customRightW = null;
+      applyPanelWidths(true);
+    });
+  };
+
+  attachPanelResizer(resizerLeftEl, 'left');
+  attachPanelResizer(resizerRightEl, 'right');
+  window.addEventListener('resize', () => applyPanelWidths(false));
 
   checkpointForm.addEventListener('submit', (e) => {
     e.preventDefault();
@@ -1141,6 +1762,36 @@ async function bootstrapPywlet(): Promise<void> {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'b') {
       e.preventDefault();
       btnFocusMode.click();
+    }
+    if (e.key === 'F5') {
+      e.preventDefault();
+      if (runtime.isPaused()) {
+        setSlowMo(false);
+        runtime.continueDebug();
+      } else if (!runtime.isRunning()) {
+        runActiveGame(false);
+      }
+      return;
+    }
+    if (e.key === 'F9') {
+      e.preventDefault();
+      if (!runtime.isRunning()) {
+        runActiveGame(true);
+      }
+      return;
+    }
+    if (e.key === 'F10' && runtime.isPaused()) {
+      e.preventDefault();
+      setSlowMo(false);
+      runtime.stepOver();
+      return;
+    }
+    if (e.key === 'F11' && runtime.isPaused()) {
+      e.preventDefault();
+      setSlowMo(false);
+      if (e.shiftKey) runtime.stepOut();
+      else runtime.stepInto();
+      return;
     }
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 's') {
       e.preventDefault();

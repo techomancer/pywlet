@@ -9,6 +9,7 @@
  */
 export const PYWLET_PYTHON_BOOTSTRAP = `
 import ast
+import bdb
 import builtins
 import difflib
 import json
@@ -700,6 +701,7 @@ class _PyClock:
         elapsed = now - self._last
         remain_ms = max(1, int((target - elapsed) * 1000))
         _pywlet_host.sleep_ms(remain_ms)
+        _pywlet_maybe_attach_debugger()
         after = time.monotonic()
         dt = after - self._last
         self._last = after
@@ -774,6 +776,7 @@ def _build_pygame_module():
             _pywlet_host.flush_frame(json.dumps(_pywlet_frame_cmds))
             _pywlet_frame_cmds = []
         _pywlet_host.check_stop()
+        _pywlet_maybe_attach_debugger()
         # Pace to ~60 FPS even if learner forgot clock.tick(60)
         if not _pywlet_clock_used:
             now = time.monotonic()
@@ -934,11 +937,474 @@ builtins.play_sound = _pywlet_play_sound
 
 
 def _pywlet_reset_runtime_state():
-    global _pywlet_frame_cmds, _pywlet_start_ms, _pywlet_last_flip, _pywlet_clock_used
+    global _pywlet_frame_cmds, _pywlet_start_ms, _pywlet_last_flip, _pywlet_clock_used, _pywlet_active_debugger
     _pywlet_frame_cmds = []
     _pywlet_start_ms = time.monotonic() * 1000.0
     _pywlet_last_flip = 0.0
     _pywlet_clock_used = False
+    _pywlet_active_debugger = None
+    sys.settrace(None)
+
+
+# =============================================================================
+# 2.5. BUILT-IN CPYTHON STEP DEBUGGER & VARIABLE INSPECTOR (bdb.Bdb + SAB)
+# =============================================================================
+
+_pywlet_active_debugger = None
+
+
+def _norm_user_filename(path):
+    if not path:
+        return ''
+    s = str(path).replace('\\\\', '/')
+    if s.startswith('/workspace/'):
+        return s[len('/workspace/'):]
+    if s.startswith('./'):
+        return s[2:]
+    return s
+
+
+def _detect_rgb_hex(val):
+    if isinstance(val, _PyColor):
+        r, g, b = int(val.r), int(val.g), int(val.b)
+        if 0 <= r <= 255 and 0 <= g <= 255 and 0 <= b <= 255:
+            return f'#{r:02x}{g:02x}{b:02x}'
+    if isinstance(val, (tuple, list)) and len(val) in (3, 4):
+        if all(isinstance(c, int) and not isinstance(c, bool) and 0 <= c <= 255 for c in val[:3]):
+            return f'#{val[0]:02x}{val[1]:02x}{val[2]:02x}'
+    return None
+
+
+def _safe_repr(val, max_len=96):
+    try:
+        txt = repr(val)
+    except Exception:
+        txt = f'<{type(val).__name__}>'
+    if len(txt) > max_len:
+        return txt[: max_len - 1] + '…'
+    return txt
+
+
+def _serialize_var_node(name, val, depth=0, max_depth=3, max_items=35):
+    tname = type(val).__name__
+    color_hex = _detect_rgb_hex(val)
+
+    if val is None or isinstance(val, (bool, int, float, str)):
+        node = {'name': str(name), 'type': tname, 'preview': _safe_repr(val, 80)}
+        return node
+
+    if isinstance(val, _PyRect):
+        node = {
+            'name': str(name),
+            'type': 'Rect',
+            'preview': f'Rect({val.x:g}, {val.y:g}, {val.width:g}, {val.height:g})',
+            'expandable': depth < max_depth,
+        }
+        if depth < max_depth:
+            node['children'] = [
+                _serialize_var_node('x', val.x, depth + 1, max_depth, max_items),
+                _serialize_var_node('y', val.y, depth + 1, max_depth, max_items),
+                _serialize_var_node('width', val.width, depth + 1, max_depth, max_items),
+                _serialize_var_node('height', val.height, depth + 1, max_depth, max_items),
+                _serialize_var_node('center', val.center, depth + 1, max_depth, max_items),
+            ]
+        return node
+
+    if isinstance(val, _PyColor):
+        node = {
+            'name': str(name),
+            'type': 'Color',
+            'preview': f'Color({val.r}, {val.g}, {val.b}, {val.a})',
+        }
+        if color_hex:
+            node['colorHex'] = color_hex
+        return node
+
+    if isinstance(val, _PySurface):
+        return {
+            'name': str(name),
+            'type': 'Surface',
+            'preview': f'Surface({val._w}×{val._h}, {val._kind})',
+        }
+
+    if isinstance(val, _PyClock):
+        return {
+            'name': str(name),
+            'type': 'Clock',
+            'preview': f'Clock({val._fps:.0f} fps)',
+        }
+
+    if isinstance(val, _PyFont):
+        return {
+            'name': str(name),
+            'type': 'Font',
+            'preview': f'Font({val.family!r}, {val.size}px)',
+        }
+
+    if isinstance(val, _PySound):
+        return {
+            'name': str(name),
+            'type': 'Sound',
+            'preview': f'Sound({val.path!r})',
+        }
+
+    if isinstance(val, (list, tuple, set)):
+        seq = list(val)
+        n = len(seq)
+        node = {
+            'name': str(name),
+            'type': f'{tname} ({n})',
+            'preview': _safe_repr(val, 80),
+            'expandable': n > 0 and depth < max_depth,
+        }
+        if color_hex:
+            node['colorHex'] = color_hex
+        if n > 0 and depth < max_depth:
+            children = [
+                _serialize_var_node(f'[{i}]', seq[i], depth + 1, max_depth, max_items)
+                for i in range(min(n, max_items))
+            ]
+            if n > max_items:
+                children.append({'name': '…', 'type': 'info', 'preview': f'+{n - max_items} more items'})
+            node['children'] = children
+        return node
+
+    if isinstance(val, dict):
+        items = list(val.items())
+        n = len(items)
+        node = {
+            'name': str(name),
+            'type': f'dict ({n})',
+            'preview': _safe_repr(val, 80),
+            'expandable': n > 0 and depth < max_depth,
+        }
+        if n > 0 and depth < max_depth:
+            children = [
+                _serialize_var_node(_safe_repr(k, 32), v, depth + 1, max_depth, max_items)
+                for k, v in items[:max_items]
+            ]
+            if n > max_items:
+                children.append({'name': '…', 'type': 'info', 'preview': f'+{n - max_items} more keys'})
+            node['children'] = children
+        return node
+
+    # Generic custom user object with __dict__
+    obj_dict = getattr(val, '__dict__', None)
+    if isinstance(obj_dict, dict) and obj_dict:
+        pub_items = [(k, v) for k, v in obj_dict.items() if not str(k).startswith('__')]
+        node = {
+            'name': str(name),
+            'type': tname,
+            'preview': _safe_repr(val, 80),
+            'expandable': len(pub_items) > 0 and depth < max_depth,
+        }
+        if pub_items and depth < max_depth:
+            node['children'] = [
+                _serialize_var_node(k, v, depth + 1, max_depth, max_items)
+                for k, v in pub_items[:max_items]
+            ]
+        return node
+
+    return {'name': str(name), 'type': tname, 'preview': _safe_repr(val, 80)}
+
+
+def _serialize_scope_dict(scope_dict):
+    nodes = []
+    if not isinstance(scope_dict, dict):
+        return nodes
+    for key, val in scope_dict.items():
+        if not isinstance(key, str):
+            continue
+        if key.startswith('__') and key.endswith('__'):
+            continue
+        if key.startswith('_pywlet_'):
+            continue
+        # Skip modules, functions, classes, and pygame helper objects that clutter beginner views
+        if isinstance(val, (types.ModuleType, types.FunctionType, types.BuiltinFunctionType, type)):
+            continue
+        nodes.append(_serialize_var_node(key, val, depth=0))
+    return nodes
+
+
+class _PywletDebugger(bdb.Bdb):
+    _NO_STOP_FRAME = object()
+
+    def __init__(self, main_filename, workspace_py_files):
+        super().__init__()
+        self.main_filename = _norm_user_filename(main_filename)
+        self.workspace_py_files = set(_norm_user_filename(f) for f in workspace_py_files)
+        self.workspace_py_files.add(self.main_filename)
+        self.user_breaks = {}  # norm_filename -> set(lineno)
+        self.bp_version = -1
+        self.pause_reason = 'step'
+        self.attached = False
+        self.sync_breakpoints(force=True)
+
+    def _is_user_frame(self, frame):
+        if frame is None:
+            return False
+        raw = frame.f_code.co_filename
+        if raw.startswith('/workspace/'):
+            return True
+        return _norm_user_filename(raw) in self.workspace_py_files
+
+    def sync_breakpoints(self, force=False):
+        ver = int(_pywlet_host.debug_get_bp_version())
+        if not force and ver == self.bp_version:
+            return
+        self.bp_version = ver
+        raw_json = _pywlet_host.debug_get_breakpoints_json()
+        parsed = {}
+        try:
+            data = json.loads(raw_json) if raw_json else {}
+            if isinstance(data, dict):
+                for fname, lines in data.items():
+                    norm = _norm_user_filename(fname)
+                    if isinstance(lines, list) and lines:
+                        parsed[norm] = set(int(x) for x in lines)
+        except Exception:
+            parsed = {}
+        self.user_breaks = parsed
+
+    def _has_breakpoint_at(self, frame):
+        self.sync_breakpoints()
+        if not self.user_breaks:
+            return False
+        norm = _norm_user_filename(frame.f_code.co_filename)
+        lines = self.user_breaks.get(norm)
+        return bool(lines and frame.f_lineno in lines)
+
+    def dispatch_call(self, frame, arg):
+        if not self._is_user_frame(frame):
+            return None
+        return super().dispatch_call(frame, arg)
+
+    def dispatch_line(self, frame):
+        if not self._is_user_frame(frame):
+            return self.trace_dispatch
+        _pywlet_host.check_stop()
+        self.sync_breakpoints()
+
+        if _pywlet_host.debug_is_pause_requested():
+            self.pause_reason = 'pause'
+            self.user_line(frame)
+            if self.quitting:
+                raise bdb.BdbQuit
+            return self.trace_dispatch
+
+        if self._has_breakpoint_at(frame):
+            self.pause_reason = 'breakpoint'
+            self.user_line(frame)
+            if self.quitting:
+                raise bdb.BdbQuit
+            return self.trace_dispatch
+
+        if self.stop_here(frame):
+            self.pause_reason = 'step'
+            self.user_line(frame)
+            if self.quitting:
+                raise bdb.BdbQuit
+        return self.trace_dispatch
+
+    def _collect_user_stack(self, top_frame):
+        frames = []
+        f = top_frame
+        while f is not None:
+            if self._is_user_frame(f):
+                frames.append(f)
+            f = f.f_back
+        return frames
+
+    def _emit_pause_snapshot(self, user_frames, selected_idx, reason, exception_text=None):
+        if not user_frames:
+            return
+        idx = max(0, min(selected_idx, len(user_frames) - 1))
+        chosen = user_frames[idx]
+
+        # Flush a non-destructive preview of pending Pygame draw calls so learners
+        # see each screen.fill / draw_circle / draw_sprite happen step-by-step!
+        if _pywlet_frame_cmds:
+            try:
+                _pywlet_host.flush_frame(json.dumps(_pywlet_frame_cmds))
+            except Exception:
+                pass
+
+        stack_meta = [
+            {
+                'index': i,
+                'filename': _norm_user_filename(fr.f_code.co_filename),
+                'lineno': int(fr.f_lineno),
+                'funcName': fr.f_code.co_name,
+            }
+            for i, fr in enumerate(user_frames)
+        ]
+
+        locals_list = _serialize_scope_dict(chosen.f_locals)
+        globals_list = (
+            []
+            if chosen.f_locals is chosen.f_globals
+            else _serialize_scope_dict(chosen.f_globals)
+        )
+
+        payload = {
+            'filename': _norm_user_filename(chosen.f_code.co_filename),
+            'lineno': int(chosen.f_lineno),
+            'reason': reason,
+            'selectedFrameIndex': idx,
+            'stack': stack_meta,
+            'locals': locals_list,
+            'globals': globals_list,
+        }
+        if exception_text:
+            payload['exceptionText'] = exception_text
+        _pywlet_host.debug_emit_paused(json.dumps(payload))
+
+    def user_return(self, frame, return_value):
+        if self._is_user_frame(frame):
+            # After Step Out finishes this function, pause on the next line in the caller
+            self.set_step()
+
+    def user_line(self, frame):
+        user_frames = self._collect_user_stack(frame)
+        if not user_frames:
+            return
+        selected_idx = 0
+        self._emit_pause_snapshot(user_frames, selected_idx, self.pause_reason)
+
+        while True:
+            cmd = int(_pywlet_host.debug_wait())
+            # 1=CONTINUE, 2=STEP_OVER, 3=STEP_INTO, 4=STEP_OUT, 6=STOP, 7=EVAL, 8=SELECT_FRAME
+            if cmd == 6:
+                self.set_quit()
+                return
+            if cmd == 8:
+                selected_idx = int(_pywlet_host.debug_get_selected_frame())
+                self._emit_pause_snapshot(user_frames, selected_idx, self.pause_reason)
+                continue
+            if cmd == 7:
+                expr = _pywlet_host.debug_get_eval_expr()
+                target_frame = user_frames[max(0, min(selected_idx, len(user_frames) - 1))]
+                try:
+                    val = eval(expr, target_frame.f_globals, target_frame.f_locals)
+                    res = {
+                        'expr': expr,
+                        'ok': True,
+                        'value': _safe_repr(val, 140),
+                        'type': type(val).__name__,
+                    }
+                    c_hex = _detect_rgb_hex(val)
+                    if c_hex:
+                        res['colorHex'] = c_hex
+                except Exception as exc:
+                    res = {
+                        'expr': expr,
+                        'ok': False,
+                        'error': f'{type(exc).__name__}: {exc}',
+                    }
+                _pywlet_host.debug_emit_eval_result(json.dumps(res))
+                continue
+            if cmd == 2:  # STEP_OVER
+                self.set_next(frame)
+                return
+            if cmd == 3:  # STEP_INTO
+                self.set_step()
+                return
+            if cmd == 4:  # STEP_OUT
+                self.set_return(frame)
+                return
+            if cmd == 1:  # CONTINUE
+                self.sync_breakpoints()
+                if self.user_breaks:
+                    # Keep tracer alive so breakpoints hit, without stopping on non-breakpoint lines
+                    self.botframe = user_frames[-1]
+                    self.stopframe = self._NO_STOP_FRAME
+                    self.returnframe = None
+                    self.stoplineno = -1
+                else:
+                    # Detach tracer for full 60 FPS until Pause or a new breakpoint is added!
+                    self._detach_from_stack(frame)
+                return
+            # Fallback: resume step over
+            self.set_next(frame)
+            return
+
+    def _detach_from_stack(self, frame):
+        self.attached = False
+        sys.settrace(None)
+        f = frame
+        while f is not None:
+            f.f_trace = None
+            f = f.f_back
+
+    def attach_to_running_stack(self, start_frame, pause_now=False):
+        self.sync_breakpoints(force=True)
+        self.reset()
+        user_frames = self._collect_user_stack(start_frame)
+        if not user_frames:
+            return
+        self.botframe = user_frames[-1]
+        if pause_now:
+            self.set_step()
+        else:
+            self.stopframe = self._NO_STOP_FRAME
+            self.returnframe = None
+            self.stoplineno = -1
+        for fr in user_frames:
+            fr.f_trace = self.trace_dispatch
+        sys.settrace(self.trace_dispatch)
+        self.attached = True
+
+    def run_compiled(self, compiled, ns, start_paused=False):
+        self.reset()
+        self.sync_breakpoints(force=True)
+        should_trace = start_paused or bool(self.user_breaks) or _pywlet_host.debug_is_pause_requested()
+        if not should_trace:
+            self.attached = False
+            exec(compiled, ns, ns)
+            return
+
+        if start_paused or _pywlet_host.debug_is_pause_requested():
+            self.set_step()
+        else:
+            self.stopframe = self._NO_STOP_FRAME
+            self.returnframe = None
+            self.stoplineno = -1
+
+        self.attached = True
+        sys.settrace(self.trace_dispatch)
+        try:
+            exec(compiled, ns, ns)
+        finally:
+            self.attached = False
+            sys.settrace(None)
+
+
+def _pywlet_maybe_attach_debugger():
+    dbg = _pywlet_active_debugger
+    if dbg is None:
+        return
+    pause_req = _pywlet_host.debug_is_pause_requested()
+    bp_count = int(_pywlet_host.debug_get_bp_count())
+    if not dbg.attached and (pause_req or bp_count > 0):
+        caller = sys._getframe().f_back
+        dbg.attach_to_running_stack(caller, pause_now=bool(pause_req))
+    elif dbg.attached and pause_req:
+        dbg.set_step()
+
+
+def _pywlet_run_with_debugger(code, filename, workspace_py_files, start_paused=False):
+    global _pywlet_active_debugger
+    ns = {'__name__': '__main__', '__file__': filename}
+    compiled = compile(code, filename, 'exec')
+    dbg = _PywletDebugger(filename, workspace_py_files)
+    _pywlet_active_debugger = dbg
+    try:
+        dbg.run_compiled(compiled, ns, start_paused=bool(start_paused))
+    except bdb.BdbQuit:
+        raise RuntimeError('__PYWLET_STOPPED__')
+    finally:
+        _pywlet_active_debugger = None
+        sys.settrace(None)
 
 
 # =============================================================================

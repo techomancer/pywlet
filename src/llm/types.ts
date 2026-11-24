@@ -83,4 +83,9 @@ export interface TutorCodeContext {
     title: string;
     friendlyExplanation: string;
   }>;
+  debugState?: {
+    filename: string;
+    line: number;
+    variables: Array<{ name: string; type: string; preview: string }>;
+  };
 }

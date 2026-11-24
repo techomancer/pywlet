@@ -13,6 +13,9 @@ export class CodeEditorController {
   private model: monaco.editor.ITextModel;
   private onCodeChangeCallback?: (code: string) => void;
   private onAskTutorCallback?: (ctx: EditorCursorContext) => void;
+  private onToggleBreakpointCallback?: (lineNumber: number) => void;
+  private breakpointDecorations: monaco.editor.IEditorDecorationsCollection;
+  private executionLineDecorations: monaco.editor.IEditorDecorationsCollection;
   private suppressChangeEvent = false;
   private readOnly = false;
 
@@ -20,10 +23,12 @@ export class CodeEditorController {
     container: HTMLElement,
     initialCode: string,
     onCodeChange?: (code: string) => void,
-    onAskTutor?: (ctx: EditorCursorContext) => void
+    onAskTutor?: (ctx: EditorCursorContext) => void,
+    onToggleBreakpoint?: (lineNumber: number) => void
   ) {
     this.onCodeChangeCallback = onCodeChange;
     this.onAskTutorCallback = onAskTutor;
+    this.onToggleBreakpointCallback = onToggleBreakpoint;
 
     this.model = monaco.editor.createModel(initialCode, 'python');
 
@@ -33,6 +38,7 @@ export class CodeEditorController {
       fontSize: 15,
       fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
       lineNumbers: 'on',
+      glyphMargin: true,
       roundedSelection: true,
       scrollBeyondLastLine: false,
       minimap: { enabled: false },
@@ -43,6 +49,22 @@ export class CodeEditorController {
       // Disable aggressive ghost-text completions; keep simple keyword discovery
       inlineSuggest: { enabled: false },
       quickSuggestions: { other: true, comments: false, strings: false },
+    });
+
+    this.breakpointDecorations = this.editor.createDecorationsCollection();
+    this.executionLineDecorations = this.editor.createDecorationsCollection();
+
+    // Clicking the left glyph margin toggles a red breakpoint dot on that line
+    this.editor.onMouseDown((e) => {
+      if (
+        e.target.type === monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN ||
+        e.target.type === monaco.editor.MouseTargetType.GUTTER_LINE_NUMBERS
+      ) {
+        const line = e.target.position?.lineNumber;
+        if (line && line > 0) {
+          this.onToggleBreakpointCallback?.(line);
+        }
+      }
     });
 
     this.model.onDidChangeContent(() => {
@@ -148,5 +170,51 @@ export class CodeEditorController {
     }));
 
     monaco.editor.setModelMarkers(this.model, 'pywlet-coach', markers);
+  }
+
+  /**
+   * Renders red breakpoint dots in the Monaco glyph margin for the currently open file.
+   */
+  setBreakpointLines(lines: number[]): void {
+    const lineCount = this.model.getLineCount();
+    const decorations: monaco.editor.IModelDeltaDecoration[] = lines
+      .filter((ln) => ln >= 1 && ln <= lineCount)
+      .map((ln) => ({
+        range: new monaco.Range(ln, 1, ln, 1),
+        options: {
+          isWholeLine: false,
+          glyphMarginClassName: 'debug-breakpoint-glyph',
+          glyphMarginHoverMessage: { value: `Breakpoint on line ${ln} (click to remove)` },
+        },
+      }));
+    this.breakpointDecorations.set(decorations);
+  }
+
+  /**
+   * Highlights the active paused execution line in Monaco and scrolls it into view.
+   */
+  setDebugExecutionLine(lineNumber: number | null): void {
+    if (!lineNumber || lineNumber < 1 || lineNumber > this.model.getLineCount()) {
+      this.executionLineDecorations.clear();
+      return;
+    }
+    this.executionLineDecorations.set([
+      {
+        range: new monaco.Range(lineNumber, 1, lineNumber, 1),
+        options: {
+          isWholeLine: true,
+          className: 'debug-current-line',
+          glyphMarginClassName: 'debug-current-line-glyph',
+          glyphMarginHoverMessage: { value: `Paused before running line ${lineNumber}` },
+        },
+      },
+    ]);
+    this.editor.revealLineInCenterIfOutsideViewport(lineNumber);
+  }
+
+  revealLine(lineNumber: number): void {
+    if (lineNumber < 1 || lineNumber > this.model.getLineCount()) return;
+    this.editor.revealLineInCenter(lineNumber);
+    this.editor.setPosition({ lineNumber, column: 1 });
   }
 }

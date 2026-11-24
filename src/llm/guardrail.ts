@@ -110,6 +110,19 @@ export function buildSocraticMessages(
 
   sections.push(`Code:\n${snippet}`);
 
+  if (ctx.debugState) {
+    const varsText =
+      ctx.debugState.variables.length > 0
+        ? ctx.debugState.variables
+            .slice(0, 14)
+            .map((v) => `${v.name} (${v.type}) = ${v.preview}`)
+            .join('\n')
+        : '(no local variables yet)';
+    sections.push(
+      `Live Debugger Snapshot (paused right before executing ${ctx.debugState.filename} line ${ctx.debugState.line}):\n${varsText}`
+    );
+  }
+
   if (!ctx.activeError && ctx.recentConsole && ctx.recentConsole.trim()) {
     sections.push(`Recent console output:\n${ctx.recentConsole.trim()}`);
   }

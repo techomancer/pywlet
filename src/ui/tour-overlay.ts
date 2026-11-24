@@ -14,8 +14,8 @@ const DEFAULT_TOUR_STEPS: TourStep[] = [
     placement: 'center',
   },
   {
-    title: '📁 Playspaces, Files & History',
-    body: 'Switch between your saved <strong>Playspaces</strong>, try read-only <strong>Examples</strong>, or open <strong>History</strong> to save named <strong>Checkpoints</strong> and time-travel back if an experiment goes sideways!',
+    title: '📁 Playspaces, History & 🐛 Debugger',
+    body: 'Use the tabs at the top to switch between <strong>Files</strong>, <strong>Spaces</strong>, <strong>History</strong> checkpoints, and the live <strong>Debug</strong> variable inspector. You can also drag the panel borders to resize!',
     selector: '.sidebar',
     placement: 'right',
   },
@@ -32,8 +32,8 @@ const DEFAULT_TOUR_STEPS: TourStep[] = [
     placement: 'left',
   },
   {
-    title: '▶ Run Game & 🧘 Focus Mode',
-    body: 'Click <strong>▶ Run Game</strong> to play your code live! Want a calmer screen? Click <strong>🧘 Focus Mode</strong> (or press <code>Ctrl+B</code>) anytime to slide the side panels out of the way.',
+    title: '▶ Run, 🐛 Debug & 🧘 Focus Mode',
+    body: 'Click <strong>▶ Run Game</strong> to play at 60 FPS, or <strong>🐛 Debug</strong> (and click line numbers for red breakpoints) to walk through your code line by line and watch variables change live!',
     selector: '.run-controls',
     placement: 'bottom',
   },

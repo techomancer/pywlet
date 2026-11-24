@@ -3,12 +3,40 @@ import {
   type SpriteProjectData,
 } from '../sprite-editor/sprite-data';
 import type { PythonDiagnostic } from '../diagnostics/python-coach';
+import {
+  DEBUG_BP_BYTE_OFFSET,
+  DEBUG_BP_MAX_BYTES,
+  DEBUG_CMD_CONTINUE,
+  DEBUG_CMD_EVAL,
+  DEBUG_CMD_IDLE,
+  DEBUG_CMD_PAUSE,
+  DEBUG_CMD_SELECT_FRAME,
+  DEBUG_CMD_STEP_INTO,
+  DEBUG_CMD_STEP_OUT,
+  DEBUG_CMD_STEP_OVER,
+  DEBUG_CMD_STOP,
+  DEBUG_EVAL_BYTE_OFFSET,
+  DEBUG_EVAL_MAX_BYTES,
+  DEBUG_SAB_BYTE_LENGTH,
+  DEBUG_SLOT_BP_COUNT,
+  DEBUG_SLOT_BP_JSON_LEN,
+  DEBUG_SLOT_BP_VERSION,
+  DEBUG_SLOT_CMD,
+  DEBUG_SLOT_EVAL_LEN,
+  DEBUG_SLOT_FRAME_IDX,
+  DEBUG_SLOT_SEQ,
+  type DebugEvalResult,
+  type DebugPausePayload,
+} from './debug-types';
 
 export interface RuntimeCallbacks {
   onStdout: (line: string) => void;
   onStderr: (line: string, friendlyLine?: { line: number; message: string }) => void;
-  onStatusChange: (status: 'ready' | 'running' | 'loading') => void;
+  onStatusChange: (status: 'ready' | 'running' | 'loading' | 'paused') => void;
   onPyodideReady?: () => void;
+  onDebugPaused?: (payload: DebugPausePayload) => void;
+  onDebugResumed?: () => void;
+  onDebugEvalResult?: (result: DebugEvalResult) => void;
   getSpriteProjectData?: () => SpriteProjectData;
   getWorkspaceFile?: (filename: string) => string | null;
 }
@@ -89,6 +117,7 @@ export class PythonPygameRuntime {
   private worker: Worker | null = null;
   private pyodideReady = false;
   private running = false;
+  private paused = false;
   private stopWatchdog: number | null = null;
 
   private interruptSab: SharedArrayBuffer | null = null;
@@ -97,6 +126,11 @@ export class PythonPygameRuntime {
   private inputBuf: Int32Array | null = null;
   private waitSab: SharedArrayBuffer | null = null;
   private waitBuf: Int32Array | null = null;
+  private debugSab: SharedArrayBuffer | null = null;
+  private debugInt32: Int32Array | null = null;
+  private debugBytes: Uint8Array | null = null;
+  private utf8Encoder = new TextEncoder();
+  private breakpointsByFile: Record<string, number[]> = {};
 
   private imageCache: Map<string, { src: string; img: HTMLImageElement }> = new Map();
   private lastSoundPlayAt: Map<string, number> = new Map();
@@ -131,6 +165,9 @@ export class PythonPygameRuntime {
       this.inputBuf = new Int32Array(this.inputSab);
       this.waitSab = new SharedArrayBuffer(4);
       this.waitBuf = new Int32Array(this.waitSab);
+      this.debugSab = new SharedArrayBuffer(DEBUG_SAB_BYTE_LENGTH);
+      this.debugInt32 = new Int32Array(this.debugSab, 0, 16);
+      this.debugBytes = new Uint8Array(this.debugSab);
     }
   }
 
@@ -204,9 +241,35 @@ export class PythonPygameRuntime {
         return;
       }
 
+      if (msg.type === 'DEBUG_PAUSED') {
+        if (this.running) {
+          this.paused = true;
+          this.callbacks.onStatusChange('paused');
+          try {
+            const payload = JSON.parse(msg.payloadJson) as DebugPausePayload;
+            this.callbacks.onDebugPaused?.(payload);
+          } catch {
+            // Ignore malformed debug snapshot
+          }
+        }
+        return;
+      }
+
+      if (msg.type === 'DEBUG_EVAL_RESULT') {
+        try {
+          const result = JSON.parse(msg.resultJson) as DebugEvalResult;
+          this.callbacks.onDebugEvalResult?.(result);
+        } catch {
+          // Ignore malformed eval response
+        }
+        return;
+      }
+
       if (msg.type === 'RUN_DONE') {
         this.clearStopWatchdog();
         this.running = false;
+        this.paused = false;
+        this.callbacks.onDebugResumed?.();
         this.callbacks.onStatusChange('ready');
         return;
       }
@@ -233,7 +296,9 @@ export class PythonPygameRuntime {
       interruptSab: this.interruptSab,
       inputSab: this.inputSab,
       waitSab: this.waitSab,
+      debugSab: this.debugSab,
     });
+    this.syncBreakpointsToSab();
 
     return worker;
   }
@@ -248,6 +313,102 @@ export class PythonPygameRuntime {
 
   public isRunning(): boolean {
     return this.running;
+  }
+
+  public isPaused(): boolean {
+    return this.paused;
+  }
+
+  public isDebugSupported(): boolean {
+    return Boolean(this.debugInt32);
+  }
+
+  private syncBreakpointsToSab(): void {
+    if (!this.debugInt32 || !this.debugBytes) return;
+    let count = 0;
+    const cleaned: Record<string, number[]> = {};
+    for (const [fname, lines] of Object.entries(this.breakpointsByFile)) {
+      const uniq = Array.from(new Set(lines.filter((n) => Number.isFinite(n) && n > 0))).sort(
+        (a, b) => a - b
+      );
+      if (uniq.length > 0) {
+        cleaned[fname] = uniq;
+        count += uniq.length;
+      }
+    }
+    const encoded = this.utf8Encoder.encode(JSON.stringify(cleaned));
+    const len = Math.min(encoded.length, DEBUG_BP_MAX_BYTES);
+    this.debugBytes.set(encoded.subarray(0, len), DEBUG_BP_BYTE_OFFSET);
+    Atomics.store(this.debugInt32, DEBUG_SLOT_BP_JSON_LEN, len);
+    Atomics.store(this.debugInt32, DEBUG_SLOT_BP_COUNT, count);
+    Atomics.add(this.debugInt32, DEBUG_SLOT_BP_VERSION, 1);
+  }
+
+  public setBreakpoints(breakpointsByFile: Record<string, number[]>): void {
+    this.breakpointsByFile = {};
+    for (const [k, v] of Object.entries(breakpointsByFile)) {
+      this.breakpointsByFile[k] = [...v];
+    }
+    this.syncBreakpointsToSab();
+  }
+
+  private sendDebugCommand(cmd: number, resumeUi = true): void {
+    if (!this.debugInt32) return;
+    if (resumeUi && this.paused) {
+      this.paused = false;
+      this.callbacks.onStatusChange('running');
+      this.callbacks.onDebugResumed?.();
+    }
+    Atomics.store(this.debugInt32, DEBUG_SLOT_CMD, cmd);
+    Atomics.add(this.debugInt32, DEBUG_SLOT_SEQ, 1);
+    Atomics.notify(this.debugInt32, DEBUG_SLOT_SEQ);
+  }
+
+  public pause(): void {
+    if (!this.running || this.paused || !this.debugInt32) return;
+    Atomics.store(this.debugInt32, DEBUG_SLOT_CMD, DEBUG_CMD_PAUSE);
+    Atomics.add(this.debugInt32, DEBUG_SLOT_SEQ, 1);
+    Atomics.notify(this.debugInt32, DEBUG_SLOT_SEQ);
+    if (this.waitBuf) {
+      Atomics.notify(this.waitBuf, 0);
+    }
+  }
+
+  public continueDebug(): void {
+    if (!this.running || !this.paused) return;
+    this.sendDebugCommand(DEBUG_CMD_CONTINUE, true);
+  }
+
+  public stepOver(): void {
+    if (!this.running || !this.paused) return;
+    this.sendDebugCommand(DEBUG_CMD_STEP_OVER, true);
+  }
+
+  public stepInto(): void {
+    if (!this.running || !this.paused) return;
+    this.sendDebugCommand(DEBUG_CMD_STEP_INTO, true);
+  }
+
+  public stepOut(): void {
+    if (!this.running || !this.paused) return;
+    this.sendDebugCommand(DEBUG_CMD_STEP_OUT, true);
+  }
+
+  public selectDebugFrame(frameIndex: number): void {
+    if (!this.running || !this.paused || !this.debugInt32) return;
+    Atomics.store(this.debugInt32, DEBUG_SLOT_FRAME_IDX, Math.max(0, Math.floor(frameIndex)));
+    this.sendDebugCommand(DEBUG_CMD_SELECT_FRAME, false);
+  }
+
+  public evaluateDebugExpression(expr: string): void {
+    if (!this.running || !this.paused || !this.debugInt32 || !this.debugBytes) return;
+    const clean = expr.trim();
+    if (!clean) return;
+    const encoded = this.utf8Encoder.encode(clean);
+    const len = Math.min(encoded.length, DEBUG_EVAL_MAX_BYTES);
+    this.debugBytes.set(encoded.subarray(0, len), DEBUG_EVAL_BYTE_OFFSET);
+    Atomics.store(this.debugInt32, DEBUG_SLOT_EVAL_LEN, len);
+    this.sendDebugCommand(DEBUG_CMD_EVAL, false);
   }
 
   private bindInputEvents(): void {
@@ -346,6 +507,8 @@ export class PythonPygameRuntime {
   public stop(): void {
     if (!this.running) return;
     this.running = false;
+    this.paused = false;
+    this.callbacks.onDebugResumed?.();
     this.callbacks.onStatusChange('ready');
 
     if (this.inputBuf) {
@@ -357,6 +520,11 @@ export class PythonPygameRuntime {
     if (this.waitBuf) {
       Atomics.store(this.waitBuf, 0, 1);
       Atomics.notify(this.waitBuf, 0);
+    }
+    if (this.debugInt32) {
+      Atomics.store(this.debugInt32, DEBUG_SLOT_CMD, DEBUG_CMD_STOP);
+      Atomics.add(this.debugInt32, DEBUG_SLOT_SEQ, 1);
+      Atomics.notify(this.debugInt32, DEBUG_SLOT_SEQ);
     }
     this.worker?.postMessage({ type: 'STOP' });
 
@@ -446,12 +614,13 @@ export class PythonPygameRuntime {
   }
 
   /**
-   * Executes real Python/Pygame code inside Pyodide.
+   * Executes real Python/Pygame code inside Pyodide (optionally starting paused in step-debug mode).
    */
   public async runCode(
     code: string,
     filename = 'main.py',
-    workspaceFiles: Record<string, string> = {}
+    workspaceFiles: Record<string, string> = {},
+    options: { debugMode?: boolean } = {}
   ): Promise<void> {
     if (this.running) {
       this.stop();
@@ -468,6 +637,10 @@ export class PythonPygameRuntime {
       for (let i = 3; i < 128; i++) Atomics.store(this.inputBuf, i, 0);
     }
     if (this.waitBuf) Atomics.store(this.waitBuf, 0, 0);
+    if (this.debugInt32) {
+      Atomics.store(this.debugInt32, DEBUG_SLOT_CMD, DEBUG_CMD_IDLE);
+      this.syncBreakpointsToSab();
+    }
 
     const imgSizes = await this.collectWorkspaceImageSizes(workspaceFiles);
 
@@ -480,12 +653,15 @@ export class PythonPygameRuntime {
     }
 
     this.running = true;
+    this.paused = false;
     this.callbacks.onStatusChange(this.pyodideReady ? 'running' : 'loading');
     // Move keyboard focus off Monaco / Run button onto the Game Stage canvas immediately
-    if (document.activeElement instanceof HTMLElement && document.activeElement !== this.canvas) {
-      document.activeElement.blur();
+    if (!options.debugMode) {
+      if (document.activeElement instanceof HTMLElement && document.activeElement !== this.canvas) {
+        document.activeElement.blur();
+      }
+      this.canvas.focus();
     }
-    this.canvas.focus();
 
     worker.postMessage({
       type: 'RUN',
@@ -494,6 +670,7 @@ export class PythonPygameRuntime {
       workspaceFiles: pyFiles,
       imgSizes,
       pyodideBaseUrl: this.getPyodideBaseUrl(),
+      debugMode: Boolean(options.debugMode),
     });
   }
 

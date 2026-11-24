@@ -549,44 +549,92 @@ body,
   color: var(--accent-blue);
 }
 
-/* Main 3-Column Workspace */
+/* Main 3-Column Workspace with Draggable Split Resizers */
 .workspace {
+  --left-col-w: clamp(235px, 19vw, 310px);
+  --right-col-w: clamp(428px, 30vw, 540px);
+  --left-handle-w: 5px;
+  --right-handle-w: 5px;
   flex: 1;
   display: grid;
-  grid-template-columns: 245px 1fr 428px;
+  grid-template-columns:
+    var(--left-col-w)
+    var(--left-handle-w)
+    minmax(300px, 1fr)
+    var(--right-handle-w)
+    var(--right-col-w);
   min-height: 0;
-  transition: grid-template-columns 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+  transition: grid-template-columns 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.workspace.is-resizing {
+  transition: none;
 }
 
 .workspace.hide-left {
-  grid-template-columns: 0px 1fr 428px;
+  grid-template-columns:
+    0px
+    0px
+    minmax(300px, 1fr)
+    var(--right-handle-w)
+    var(--right-col-w);
 }
 
 .workspace.hide-right {
-  grid-template-columns: 245px 1fr 0px;
+  grid-template-columns:
+    var(--left-col-w)
+    var(--left-handle-w)
+    minmax(300px, 1fr)
+    0px
+    0px;
 }
 
 .workspace.hide-left.hide-right {
-  grid-template-columns: 0px 1fr 0px;
+  grid-template-columns: 0px 0px 1fr 0px 0px;
 }
 
-.workspace.hide-left .sidebar {
+.workspace.hide-left .sidebar,
+.workspace.hide-left #resizer-left {
   overflow: hidden;
   border-right: none;
   opacity: 0;
   pointer-events: none;
 }
 
-.workspace.hide-right .stage-tutor-column {
+.workspace.hide-right .stage-tutor-column,
+.workspace.hide-right #resizer-right {
   overflow: hidden;
   opacity: 0;
   pointer-events: none;
 }
 
+.panel-resizer {
+  position: relative;
+  cursor: col-resize;
+  background: var(--border);
+  transition: background 0.15s ease;
+  z-index: 5;
+}
+
+.panel-resizer::after {
+  content: '';
+  position: absolute;
+  inset: 0 -3px;
+}
+
+.panel-resizer:hover,
+.panel-resizer.dragging {
+  background: var(--accent-blue);
+}
+
+body.resizing-panels {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
 /* Left Sidebar */
 .sidebar {
   background: var(--bg-panel);
-  border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   overflow-y: auto;
@@ -803,7 +851,6 @@ body,
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  border-right: 1px solid var(--border);
 }
 
 .editor-statusbar {
@@ -1621,16 +1668,299 @@ body,
   overflow-wrap: anywhere;
 }
 
-.playspace-header-actions {
+.sidebar-view-tabs {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(52px, 1fr));
+  gap: 4px;
+}
+
+.sidebar-tab {
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  border-radius: 5px;
+  padding: 5px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background 0.14s ease, border-color 0.14s ease, color 0.14s ease;
+}
+
+.sidebar-tab:hover {
+  color: var(--text-main);
+  border-color: var(--accent-border);
+}
+
+.sidebar-tab.active {
+  background: var(--accent-soft);
+  color: var(--accent-blue);
+  border-color: var(--accent-blue);
+}
+
+.sidebar-tab.has-alert {
+  border-color: var(--accent-amber);
+  color: var(--accent-amber);
+}
+
+/* Slim Step Debugger Bar above Monaco */
+.debug-toolbar {
   display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 12px;
+  background: var(--banner-warn-bg);
+  border-bottom: 1px solid var(--banner-warn-border);
+  color: var(--banner-warn-text);
+  font-size: 12px;
+}
+
+.debug-status-label {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 11.5px;
+}
+
+.debug-toolbar-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.debug-toolbar-actions .btn.active-toggle {
+  background: var(--accent-soft);
+  color: var(--accent-blue);
+  border-color: var(--accent-blue);
+}
+
+/* Monaco Breakpoints & Paused Execution Line Decorations */
+.debug-breakpoint-glyph {
+  position: relative;
+}
+
+.debug-breakpoint-glyph::before {
+  content: '';
+  display: block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #ef4444;
+  border: 1.5px solid #fecaca;
+  margin: 4px auto 0;
+  box-shadow: 0 0 6px rgba(239, 68, 68, 0.7);
+}
+
+.debug-current-line {
+  background: rgba(245, 158, 11, 0.24) !important;
+  box-shadow: inset 3px 0 0 #f59e0b;
+}
+
+.debug-current-line-glyph::after {
+  content: '▶';
+  color: #f59e0b;
+  font-size: 12px;
+  font-weight: 900;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+}
+
+/* Left Sidebar: Live Debug & Variable Inspector Panel */
+.workspace-debug-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+}
+
+.debug-vars-container {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.debug-empty-note {
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-muted);
+  background: var(--bg-dark);
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  padding: 9px;
+}
+
+.debug-scope-heading {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin-top: 6px;
+  margin-bottom: 2px;
+}
+
+.debug-var-row {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-dark);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 5px 7px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  gap: 3px;
+}
+
+.debug-var-row.changed {
+  border-color: var(--accent-amber);
+  background: var(--banner-warn-bg);
+}
+
+.debug-var-main {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.debug-var-expand {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 10px;
+  width: 14px;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.debug-var-name {
+  color: var(--accent-blue);
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.debug-var-val {
+  color: var(--text-main);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.debug-var-type {
+  font-size: 9.5px;
+  color: var(--text-muted);
+  background: var(--bg-elevated);
+  padding: 1px 4px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.debug-var-diff {
+  font-size: 10px;
+  color: var(--banner-warn-text);
+  padding-left: 16px;
+  word-break: break-all;
+}
+
+.debug-var-children {
+  margin-top: 4px;
+  padding-left: 12px;
+  border-left: 1px dashed var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.debug-subsection {
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+.debug-eval-form {
+  display: flex;
+  gap: 5px;
+}
+
+.debug-eval-output {
+  margin-top: 5px;
+  padding: 5px 7px;
+  border-radius: 5px;
+  background: var(--bg-dark);
+  border: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-main);
+  word-break: break-word;
+  display: flex;
+  align-items: center;
   gap: 6px;
 }
 
-.playspace-switch-btn,
-.playspace-history-btn {
-  flex: 1;
-  text-align: center;
-  white-space: nowrap;
+.debug-eval-output.is-err {
+  border-color: var(--banner-err-border);
+  color: var(--badge-err-text);
+}
+
+.debug-stack-list,
+.debug-bp-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.debug-stack-item,
+.debug-bp-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 5px 7px;
+  border-radius: 5px;
+  background: var(--bg-dark);
+  border: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-main);
+  cursor: pointer;
+}
+
+.debug-stack-item:hover,
+.debug-bp-item:hover {
+  border-color: var(--accent-border);
+  background: var(--bg-elevated);
+}
+
+.debug-stack-item.active {
+  border-color: var(--accent-blue);
+  background: var(--accent-soft);
+  color: var(--accent-blue);
+  font-weight: 700;
+}
+
+.debug-bp-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #ef4444;
+  display: inline-block;
+  margin-right: 6px;
+  flex-shrink: 0;
+}
+
+.status-paused {
+  background: var(--badge-warn-bg);
+  color: var(--badge-warn-text);
 }
 
 /* Checkpoints / Version History Panel */
